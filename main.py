@@ -18,9 +18,9 @@ if not MONGO_URI:
 
 client = AsyncIOMotorClient(MONGO_URI)
 
-db = client.onboardingApp
+db = client.too
 
-collection_users = db.get_collection("users")
+collection_users = db.get_collection("too")
 
 
 # --- Modelos de Dados (Pydantic) ---
@@ -35,9 +35,8 @@ class UserInDB(BaseModel):
 app = FastAPI()
 
 
-# --- Endpoints da API ---
+# --- Endpoints
 
-# Endpoint 1: Raiz (só para testar)
 @app.get("/")
 async def read_root():
     return {"Mensagem": "API de Onboarding no ar!"}
