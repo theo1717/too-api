@@ -9,7 +9,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Configuração do Banco de Dados ---
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://toofrontend.vercel.app/",
+        "http://localhost:3000"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 MONGO_URI = os.getenv("MONGO_URI")
 
