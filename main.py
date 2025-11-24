@@ -1,11 +1,10 @@
 import os
 import uvicorn
 from fastapi import FastAPI, HTTPException, Depends
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
-from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.context import CryptContext
@@ -32,22 +31,18 @@ if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada no .env")
 
 client = AsyncIOMotorClient(MONGO_URI)
-
-# ATUALIZADO ➝ database = users
-db = client.users  
-
-# ATUALIZADO ➝ collection = too_users
+db = client.users
 collection_users = db.get_collection("too_users")
 
 # Segurança
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
 
 SECRET_KEY = "CHAVE_MUITO_SECRETA"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 
+# --- Pydantic Models ---
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
@@ -58,8 +53,12 @@ class UserUpdate(BaseModel):
     password: str | None = None
 
 
-# Funções auxiliares
+class LoginRequest(BaseModel):
+    username: EmailStr
+    password: str
 
+
+# --- Funções auxiliares ---
 def hash_password(password):
     return pwd_context.hash(password)
 
@@ -72,6 +71,11 @@ def create_token(data: dict):
     data = data.copy()
     data["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
+
+# Dependência para obter usuário do token
+from fastapi.security import OAuth2PasswordBearer
+oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
 
 
 async def get_user_from_token(token: str = Depends(oauth2)):
@@ -93,8 +97,7 @@ async def get_user_from_token(token: str = Depends(oauth2)):
         raise HTTPException(status_code=401, detail="Token inválido")
 
 
-# Rotas
-
+# --- Rotas ---
 @app.get("/")
 async def root():
     return {"mensagem": "API funcionando!"}
@@ -108,66 +111,57 @@ async def register_user(user: UserRegister):
         raise HTTPException(status_code=400, detail="Email já registrado")
 
     hashed = hash_password(user.password)
-
     new_user = {"email": user.email, "password": hashed}
 
     result = await collection_users.insert_one(new_user)
-
     return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
 
 
-# LOGIN
-from fastapi import Form
-
+# LOGIN (JSON)
 @app.post("/login")
-async def login(username: str = Form(...), password: str = Form(...)):
+async def login(data: LoginRequest):
+    username = data.username
+    password = data.password
+
     user = await collection_users.find_one({"email": username})
 
-    if not user:
-        raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
-
-    if not verify_password(password, user["password"]):
+    if not user or not verify_password(password, user["password"]):
         raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
 
     token = create_token({"sub": user["email"]})
-
     return {"access_token": token, "token_type": "bearer"}
 
-# USERS
+
+# LIST USERS
 @app.get("/users")
 async def list_users(current_user=Depends(get_user_from_token)):
     users = []
     async for u in collection_users.find():
-        users.append({
-            "email": u["email"],
-            "id": str(u["_id"])
-        })
+        users.append({"email": u["email"], "id": str(u["_id"])})
     return users
 
 
-# Validate email
+# VALIDATE EMAIL
 @app.post("/validate-email")
 async def validate_email(email: EmailStr):
     exists = await collection_users.find_one({"email": email})
     return {"exists": bool(exists)}
 
 
-# DELETE account
+# DELETE ACCOUNT
 @app.delete("/delete-account")
 async def delete_account(current_user=Depends(get_user_from_token)):
     await collection_users.delete_one({"email": current_user["email"]})
     return {"mensagem": "Conta deletada"}
 
 
-# UPDATE account
+# UPDATE ACCOUNT
 @app.put("/update-account")
 async def update_account(data: UserUpdate, current_user=Depends(get_user_from_token)):
-
     update_data = {}
 
     if data.email:
         update_data["email"] = data.email
-
     if data.password:
         update_data["password"] = hash_password(data.password)
 
