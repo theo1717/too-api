@@ -1,85 +1,49 @@
-# main.py
-
 import os
 import uvicorn
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr
 from motor.motor_asyncio import AsyncIOMotorClient
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 load_dotenv()
-
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://toofrontend.vercel.app/",
-        "http://localhost:3000"
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ---- Mongo ----
 MONGO_URI = os.getenv("MONGO_URI")
-
-if not MONGO_URI:
-    raise Exception("Erro: MONGO_URI não encontrada no ficheiro .env")
-
 client = AsyncIOMotorClient(MONGO_URI)
-
 db = client.too
-
 collection_users = db.get_collection("too")
 
-
-# --- Modelos de Dados (Pydantic) ---
-
-class UserRegister(BaseModel):
+# ---- Modelo ----
+class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
-class UserInDB(BaseModel):
-    email: EmailStr
-
-app = FastAPI()
-
-
-# --- Endpoints
-
 @app.get("/")
-async def read_root():
-    return {"Mensagem": "API de Onboarding no ar!"}
+async def home():
+    return {"mensagem": "API funcionando!"}
 
+@app.post("/login")
+async def login(user: UserLogin):
 
-# Endpoint 2: Registar Utilizador
-@app.post("/register")
-async def register_user(user: UserRegister):
-    
-    existing_user = await collection_users.find_one({"email": user.email})
-    
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Este email já está registado.",
-        )
+    user_db = await collection_users.find_one({"email": user.email})
 
-    user_data = user.model_dump()
-    
+    if not user_db:
+        raise HTTPException(400, "Email ou senha incorretos")
 
-    # Insere o novo utilizador no banco de dados
-    new_user = await collection_users.insert_one(user_data)
+    if user_db["password"] != user.password:
+        raise HTTPException(400, "Email ou senha incorretos")
 
-    # Retorna uma mensagem de sucesso
-    return {
-        "mensagem": "Utilizador registado com sucesso!",
-        "user_id": str(new_user.inserted_id)
-    }
-
-# --- rodar localmente ---
+    return {"mensagem": "Login OK", "email": user.email}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
