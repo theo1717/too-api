@@ -1,7 +1,6 @@
 import os
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, EmailStr
+from fastapi import FastAPI, HTTPException, Form
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -10,6 +9,7 @@ load_dotenv()
 
 app = FastAPI()
 
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,33 +17,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- Mongo ----
+# --- MongoDB ---
 MONGO_URI = os.getenv("MONGO_URI")
 client = AsyncIOMotorClient(MONGO_URI)
-db = client.too
-collection_users = db.get_collection("too")
+db = client.users       # banco = "users"
+collection_users = db.too_users   # coleção = "too_users"
 
-# ---- Modelo ----
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
 
 @app.get("/")
 async def home():
     return {"mensagem": "API funcionando!"}
 
-@app.post("/login")
-async def login(user: UserLogin):
 
-    user_db = await collection_users.find_one({"email": user.email})
+# ----------------------------------------------------
+# 🔐 LOGIN — RECEBE username e password via FORM-DATA
+# ----------------------------------------------------
+@app.post("/login")
+async def login(username: str = Form(...), password: str = Form(...)):
+    print("🔎 Recebido do front:", username, password)
+
+    user_db = await collection_users.find_one({"email": username})
 
     if not user_db:
         raise HTTPException(400, "Email ou senha incorretos")
 
-    if user_db["password"] != user.password:
+    # No Mongo Atlas o campo é "senha"
+    if user_db["senha"] != password:
         raise HTTPException(400, "Email ou senha incorretos")
 
-    return {"mensagem": "Login OK", "email": user.email}
+    return {"mensagem": "Login OK", "email": username}
 
+
+# --- Rodar local ---
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
