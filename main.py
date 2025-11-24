@@ -117,20 +117,21 @@ async def register_user(user: UserRegister):
 
 
 # LOGIN
+from fastapi import Form
+
 @app.post("/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = await collection_users.find_one({"email": form_data.username})
+async def login(username: str = Form(...), password: str = Form(...)):
+    user = await collection_users.find_one({"email": username})
 
     if not user:
-        raise HTTPException(status_code=400, detail="Email ou senha incorretos")
+        raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
 
-    if not verify_password(form_data.password, user["password"]):
-        raise HTTPException(status_code=400, detail="Email ou senha incorretos")
+    if not verify_password(password, user["password"]):
+        raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
 
     token = create_token({"sub": user["email"]})
 
     return {"access_token": token, "token_type": "bearer"}
-
 
 # USERS
 @app.get("/users")
