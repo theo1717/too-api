@@ -11,7 +11,7 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 
-# ---------- IMPORTA O NOVO RAG VIA API ----------
+# Import do RAG atualizado (Groq)
 from rag import rag_answer
 
 load_dotenv()
@@ -37,19 +37,15 @@ if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada nas variáveis de ambiente.")
 
 client = AsyncIOMotorClient(MONGO_URI)
-
 db_users = client.users
 collection_users = db_users.get_collection("too_users")
 
 # ---------- SEGURANÇA ----------
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 SECRET_KEY = os.getenv("SECRET_KEY", "CHAVE_MUITO_SECRETA")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
-
 oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
-
 
 # ---------- MODELS ----------
 class UserRegister(BaseModel):
@@ -68,14 +64,11 @@ class ChatRequest(BaseModel):
     chat_id: str | None = None
     message: str
 
-
 # ---------- FUNÇÕES ----------
 def hash_password(password):
-    # Trunca para 72 bytes antes de gerar hash
     return pwd_context.hash(password[:72])
 
 def verify_password(password, hashed):
-    # Trunca para 72 bytes antes de verificar
     return pwd_context.verify(password[:72], hashed)
 
 def create_token(data: dict):
@@ -87,7 +80,6 @@ async def get_user_from_token(token: str = Depends(oauth2)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email = payload.get("sub")
-
         if not email:
             raise HTTPException(status_code=401, detail="Token inválido")
 
@@ -96,73 +88,65 @@ async def get_user_from_token(token: str = Depends(oauth2)):
             raise HTTPException(status_code=401, detail="Usuário não encontrado")
 
         return user
-
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
-
 
 # ---------- ROTAS ----------
 @app.get("/")
 async def root():
     return {"mensagem": "API funcionando!"}
 
-
 # ----------- AUTH ---------------
 @app.post("/register")
 async def register_user(user: UserRegister):
-    existing = await collection_users.find_one({"email": user.email})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email já registrado")
+    try:
+        existing = await collection_users.find_one({"email": user.email})
+        if existing:
+            raise HTTPException(status_code=400, detail="Email já registrado")
 
-    hashed = hash_password(user.password)
-    new_user = {"email": user.email, "password": hashed}
-
-    result = await collection_users.insert_one(new_user)
-
-    return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
-
+        hashed = hash_password(user.password)
+        new_user = {"email": user.email, "password": hashed}
+        result = await collection_users.insert_one(new_user)
+        return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao registrar usuário: {str(e)}")
 
 @app.post("/login")
 async def login(data: LoginRequest):
-    user = await collection_users.find_one({"email": data.username})
+    try:
+        user = await collection_users.find_one({"email": data.username})
+        if not user or not verify_password(data.password, user["password"]):
+            raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
 
-    if not user or not verify_password(data.password, user["password"]):
-        raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
-
-    token = create_token({"sub": user["email"]})
-    return {"access_token": token, "token_type": "bearer"}
-
+        token = create_token({"sub": user["email"]})
+        return {"access_token": token, "token_type": "bearer"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao fazer login: {str(e)}")
 
 @app.get("/users")
 async def list_users(current_user=Depends(get_user_from_token)):
     users = []
     async for u in collection_users.find():
         users.append({"email": u["email"], "id": str(u["_id"])})
-
     return users
-
 
 @app.post("/validate-email")
 async def validate_email(email: EmailStr):
     exists = await collection_users.find_one({"email": email})
     return {"exists": bool(exists)}
 
-
 @app.delete("/delete-account")
 async def delete_account(current_user=Depends(get_user_from_token)):
     await collection_users.delete_one({"email": current_user["email"]})
     return {"mensagem": "Conta deletada"}
 
-
 @app.put("/update-account")
 async def update_account(data: UserUpdate, current_user=Depends(get_user_from_token)):
     update_data = {}
-
     if data.email:
         update_data["email"] = data.email
     if data.password:
         update_data["password"] = hash_password(data.password)
-
     if not update_data:
         raise HTTPException(status_code=400, detail="Nenhum campo enviado")
 
@@ -170,20 +154,17 @@ async def update_account(data: UserUpdate, current_user=Depends(get_user_from_to
         {"email": current_user["email"]},
         {"$set": update_data}
     )
-
     return {"mensagem": "Conta atualizada"}
-
 
 # ----------- CHAT COM RAG VIA GROQ + MONGO -----------
 @app.post("/chat")
 async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
-
-    chat_id = req.chat_id or str(datetime.utcnow().timestamp())
-
-    answer = await rag_answer(req.message)
-
-    return {"answer": answer, "chat_id": chat_id}
-
+    try:
+        chat_id = req.chat_id or str(datetime.utcnow().timestamp())
+        answer = await rag_answer(req.message)
+        return {"answer": answer, "chat_id": chat_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro no chat: {str(e)}")
 
 # ---------- MAIN ----------
 if __name__ == "__main__":
