@@ -33,8 +33,8 @@ client = AsyncIOMotorClient(MONGO_URI)
 db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
-MODEL_EMBED = "llama-3.2-1b"
-MODEL_LLM = "llama-3.2-1b"
+MODEL_EMBED = "text-embedding-3-small"       # embeddings
+MODEL_LLM = "llama-3.1-8b-instant"      # LLM
 
 # -------- FUNÇÃO 1: gerar embedding via API --------
 async def get_embedding(text: str, fallback_size=1024):
