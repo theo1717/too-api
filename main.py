@@ -10,7 +10,6 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 # RAG imports
-from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain.vectorstores import FAISS
