@@ -61,5 +61,25 @@ class RAGPipeline:
         return self.tokenizer.decode(output[0], skip_special_tokens=True)
 
 
-# Instância global usada pelo FastAPI
+# ------------ Instância global ------------
 rag_pipeline = RAGPipeline()
+
+
+# -----------------------------------------
+# FUNÇÕES QUE VOCÊ QUERIA MANTER
+# -----------------------------------------
+
+def load_vectorstore():
+    """Carrega embeddings, modelo e FAISS."""
+    rag_pipeline.load()
+    return rag_pipeline.vectorstore
+
+
+def config_rag_chain():
+    """Retorna a instância configurada do pipeline."""
+    return rag_pipeline
+
+
+def chat_iteration(question: str):
+    """Executa uma geração única no modelo."""
+    return rag_pipeline.ask(question)
