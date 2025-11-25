@@ -9,6 +9,13 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
+# RAG imports
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain.vectorstores import FAISS
+from langchain.embeddings import HuggingFaceEmbeddings
+
 load_dotenv()
 
 app = FastAPI()
@@ -32,52 +39,50 @@ if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada no .env")
 
 client = AsyncIOMotorClient(MONGO_URI)
-db = client.users
-collection_users = db.get_collection("too_users")
+db_users = client.users
+collection_users = db_users.get_collection("too_users")
+
+db_embeddings = client.file_data
+collection_embeddings = db_embeddings.get_collection("embeddings")
 
 # Segurança
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 SECRET_KEY = "CHAVE_MUITO_SECRETA"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
-
 
 # --- Pydantic Models ---
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
 
-
 class UserUpdate(BaseModel):
     email: EmailStr | None = None
     password: str | None = None
-
 
 class LoginRequest(BaseModel):
     username: EmailStr
     password: str
 
+class ChatRequest(BaseModel):
+    chat_id: str | None = None
+    message: str
 
 # --- Funções auxiliares ---
 def hash_password(password):
     return pwd_context.hash(password)
 
-
 def verify_password(password, hashed):
     return pwd_context.verify(password, hashed)
-
 
 def create_token(data: dict):
     data = data.copy()
     data["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
 
-
 # Dependência para obter usuário do token
 from fastapi.security import OAuth2PasswordBearer
 oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
-
 
 async def get_user_from_token(token: str = Depends(oauth2)):
     try:
@@ -97,12 +102,46 @@ async def get_user_from_token(token: str = Depends(oauth2)):
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
 
+# --- Inicializa LLM + embeddings RAG ---
+llm_model_id = os.getenv("LLM_MODEL_ID", "deepseek-r1-distill-llama-70b")
+embedding_model_name = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
+
+llm = ChatGroq(model=llm_model_id, temperature=0.7)
+
+# Carregar FAISS index local ou criar se não existir
+if os.path.exists("index_faiss"):
+    vectorstore = FAISS.load_local("index_faiss", HuggingFaceEmbeddings(model_name=embedding_model_name))
+else:
+    vectorstore = None
+
+retriever = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k":3, "fetch_k":4}) if vectorstore else None
+
+chat_histories = {}  # Em memória. Pode migrar para MongoDB se quiser persistência.
+
+# --- Funções RAG ---
+def config_rag_chain(llm, retriever):
+    system_prompt = "Você é Too, assistente virtual da Tecnotooling. Responda em português, claro e objetivo."
+    qa_prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "Pergunta: {input}\n\n Contexto: {context}")
+    ])
+    from langchain.chains import create_retrieval_chain, create_stuff_documents_chain, create_history_aware_retriever
+    history_retriever = create_history_aware_retriever(llm=llm, retriever=retriever, prompt=qa_prompt)
+    qa_chain = create_stuff_documents_chain(llm, qa_prompt)
+    return create_retrieval_chain(history_retriever, qa_chain)
+
+def chat_iteration(rag_chain, user_input, messages):
+    messages.append(HumanMessage(content=user_input))
+    resp = rag_chain.invoke({"input": user_input, "chat_history": messages})
+    answer = resp.get("answer", "")
+    messages.append(AIMessage(content=answer))
+    return answer
 
 # --- Rotas ---
 @app.get("/")
 async def root():
     return {"mensagem": "API funcionando!"}
-
 
 # REGISTER
 @app.post("/register")
@@ -117,8 +156,7 @@ async def register_user(user: UserRegister):
     result = await collection_users.insert_one(new_user)
     return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
 
-
-# LOGIN (JSON)
+# LOGIN
 @app.post("/login")
 async def login(data: LoginRequest):
     username = data.username
@@ -132,7 +170,6 @@ async def login(data: LoginRequest):
     token = create_token({"sub": user["email"]})
     return {"access_token": token, "token_type": "bearer"}
 
-
 # LIST USERS
 @app.get("/users")
 async def list_users(current_user=Depends(get_user_from_token)):
@@ -141,20 +178,17 @@ async def list_users(current_user=Depends(get_user_from_token)):
         users.append({"email": u["email"], "id": str(u["_id"])})
     return users
 
-
 # VALIDATE EMAIL
 @app.post("/validate-email")
 async def validate_email(email: EmailStr):
     exists = await collection_users.find_one({"email": email})
     return {"exists": bool(exists)}
 
-
 # DELETE ACCOUNT
 @app.delete("/delete-account")
 async def delete_account(current_user=Depends(get_user_from_token)):
     await collection_users.delete_one({"email": current_user["email"]})
     return {"mensagem": "Conta deletada"}
-
 
 # UPDATE ACCOUNT
 @app.put("/update-account")
@@ -176,6 +210,20 @@ async def update_account(data: UserUpdate, current_user=Depends(get_user_from_to
 
     return {"mensagem": "Conta atualizada"}
 
+# --- ROTA DE CHAT RAG ---
+@app.post("/chat")
+async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
+    if not retriever:
+        raise HTTPException(status_code=500, detail="RAG não inicializado")
+    
+    chat_id = req.chat_id or str(datetime.utcnow().timestamp())
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = {"messages": []}
+
+    messages = chat_histories[chat_id]["messages"]
+    rag_chain = config_rag_chain(llm, retriever)
+    answer = chat_iteration(rag_chain, req.message, messages)
+    return {"answer": answer, "chat_id": chat_id}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
