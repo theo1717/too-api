@@ -1,4 +1,4 @@
-# rag.py
+# rag_debug.py
 import os
 import numpy as np
 from groq import Groq
@@ -6,6 +6,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import httpx
 import logging
+
+logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 
@@ -20,11 +22,11 @@ if not MONGO_URI:
 
 # ---- CLIENTE GROQ ----
 try:
-    http_client = httpx.Client()  # configure proxies aqui se precisar
+    http_client = httpx.Client()
     groq_client = Groq(api_key=GROQ_API_KEY, http_client=http_client)
 except Exception as e:
     logging.error(f"Falha ao inicializar Groq: {e}")
-    groq_client = None  # fallback para evitar crash
+    groq_client = None
 
 # ---- MONGO ----
 client = AsyncIOMotorClient(MONGO_URI)
@@ -35,43 +37,45 @@ MODEL_EMBED = "llama-3.2-1b"
 MODEL_LLM = "llama-3.2-1b"
 
 # -------- FUNÇÃO 1: gerar embedding via API --------
-async def get_embedding(text: str):
+async def get_embedding(text: str, fallback_size=1024):
     if not groq_client:
         logging.warning("Groq client não disponível, retornando embedding vazio")
-        return np.zeros(768)  # fallback: vetor nulo
+        return np.zeros(fallback_size)
 
     try:
-        response = groq_client.embeddings.create(
-            model=MODEL_EMBED,
-            input=text
-        )
-        return response.data[0].embedding
+        response = groq_client.embeddings.create(model=MODEL_EMBED, input=text)
+        embedding = np.array(response.data[0].embedding)
+        logging.info(f"Embedding gerado, tamanho: {embedding.shape}")
+        return embedding
     except Exception as e:
         logging.error(f"Erro ao gerar embedding: {e}")
-        return np.zeros(768)  # fallback
+        return np.zeros(fallback_size)
 
 # -------- FUNÇÃO 2: buscar top-k embeddings mais parecidos no Mongo --------
 async def search_similar_docs(query_embedding, k=3):
     results = []
-
     try:
         async for doc in collection_embeddings.find():
             doc_emb = np.array(doc["embedding"])
-            q_emb = np.array(query_embedding)
-            similarity = np.dot(q_emb, doc_emb) / (
-                np.linalg.norm(q_emb) * np.linalg.norm(doc_emb) + 1e-10
+            if doc_emb.shape != query_embedding.shape:
+                logging.warning(f"Tamanho do embedding do doc ({doc_emb.shape}) "
+                                f"diferente do query ({query_embedding.shape}), ignorando.")
+                continue
+            similarity = np.dot(query_embedding, doc_emb) / (
+                np.linalg.norm(query_embedding) * np.linalg.norm(doc_emb) + 1e-10
             )
             results.append((similarity, doc["text"]))
-
         results.sort(key=lambda x: x[0], reverse=True)
+        logging.info(f"Top {k} documentos mais similares: {[r[0] for r in results[:k]]}")
         top_texts = [r[1] for r in results[:k]]
-        return "\n".join(top_texts)
+        return "\n".join(top_texts) if top_texts else "Nenhum contexto relevante encontrado."
     except Exception as e:
         logging.error(f"Erro ao buscar documentos similares: {e}")
         return "Não foi possível buscar contexto relevante."
 
 # -------- FUNÇÃO 3: gerar resposta com contexto --------
 async def rag_answer(query: str):
+    logging.info(f"Recebido query: {query}")
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
 
@@ -86,6 +90,7 @@ PERGUNTA:
 
 Responda de forma clara e objetiva.
 """
+    logging.info(f"Prompt para LLM:\n{prompt}")
 
     if not groq_client:
         logging.warning("Groq client não disponível, retornando mensagem fallback")
@@ -100,7 +105,9 @@ Responda de forma clara e objetiva.
             ],
             max_tokens=300
         )
-        return response.choices[0].message["content"]
+        answer = response.choices[0].message["content"]
+        logging.info(f"Resposta gerada: {answer}")
+        return answer
     except Exception as e:
         logging.error(f"Erro ao gerar resposta: {e}")
         return "Desculpe, ocorreu um erro ao gerar a resposta."
