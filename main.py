@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
-# === RAG IMPORTS (LangChain moderno) ===
+# === RAG / LangChain ===
 from langchain_community.llms import HuggingFacePipeline
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -17,13 +17,15 @@ from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.schema import AIMessage, HumanMessage
 from langchain.chains.retrieval_qa.base import RetrievalQA
 
-from transformers import pipeline
+# === Transformers ===
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
 load_dotenv()
 
 app = FastAPI()
 
-# CORS
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -36,7 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB
+# --- MongoDB ---
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada no .env")
@@ -48,13 +50,13 @@ collection_users = db_users.get_collection("too_users")
 db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
-# Segurança
+# --- Segurança ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET_KEY = "CHAVE_MUITO_SECRETA"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
-# --- Pydantic Models ---
+# --- Models Pydantic ---
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
@@ -71,7 +73,7 @@ class ChatRequest(BaseModel):
     chat_id: str | None = None
     message: str
 
-# --- Funções auxiliares ---
+# --- Auxiliares ---
 def hash_password(password):
     return pwd_context.hash(password)
 
@@ -83,7 +85,7 @@ def create_token(data: dict):
     data["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
 
-# Dependência para obter usuário do token
+# --- Token dependency ---
 from fastapi.security import OAuth2PasswordBearer
 oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
 
@@ -96,7 +98,6 @@ async def get_user_from_token(token: str = Depends(oauth2)):
             raise HTTPException(status_code=401, detail="Token inválido")
 
         user = await collection_users.find_one({"email": email})
-
         if not user:
             raise HTTPException(status_code=401, detail="Usuário não encontrado")
 
@@ -105,14 +106,31 @@ async def get_user_from_token(token: str = Depends(oauth2)):
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
 
-# --- Inicializa LLM + embeddings RAG ---
-llm_model_id = os.getenv("LLM_MODEL_ID", "decapoda-research/llama-7b-hf")
+# === LLM (Google GEMMA 2B IT) ===
+llm_model_id = "google/gemma-2b-it"
 embedding_model_name = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
 
-hf_pipe = pipeline("text-generation", model=llm_model_id, max_new_tokens=512)
+tokenizer = AutoTokenizer.from_pretrained(llm_model_id)
+
+model = AutoModelForCausalLM.from_pretrained(
+    llm_model_id,
+    torch_dtype=torch.float32,
+    device_map=None  # força CPU
+)
+
+hf_pipe = pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    max_new_tokens=256,
+    temperature=0.4,
+    top_p=0.9,
+    device=-1  # CPU
+)
+
 llm = HuggingFacePipeline(pipeline=hf_pipe)
 
-# --- Carregar FAISS ---
+# === Carregar FAISS ===
 if os.path.exists("index_faiss"):
     vectorstore = FAISS.load_local(
         "index_faiss",
@@ -123,18 +141,11 @@ else:
     vectorstore = None
 
 retriever = vectorstore.as_retriever(search_kwargs={"k": 3}) if vectorstore else None
-
 chat_histories = {}
 
-# === Funções RAG ===
+# === RAG ===
 def config_rag_chain(llm, retriever):
-    system_prompt = "Você é Too, assistente virtual da Tecnotooling. Responda em português, claro e objetivo."
-
-    qa_prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        MessagesPlaceholder("chat_history"),
-        ("human", "Pergunta: {input}\n\nContexto: {context}")
-    ])
+    system_prompt = "Você é Too, assistente virtual da Tecnotooling. Responda em português de forma clara e objetiva."
 
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
@@ -174,7 +185,6 @@ async def login(data: LoginRequest):
     password = data.password
 
     user = await collection_users.find_one({"email": username})
-
     if not user or not verify_password(password, user["password"]):
         raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
 
@@ -186,7 +196,6 @@ async def list_users(current_user=Depends(get_user_from_token)):
     users = []
     async for u in collection_users.find():
         users.append({"email": u["email"], "id": str(u["_id"])})
-
     return users
 
 @app.post("/validate-email")
