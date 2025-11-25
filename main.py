@@ -71,10 +71,12 @@ class ChatRequest(BaseModel):
 
 # ---------- FUNÇÕES ----------
 def hash_password(password):
-    return pwd_context.hash(password)
+    # Trunca para 72 bytes antes de gerar hash
+    return pwd_context.hash(password[:72])
 
 def verify_password(password, hashed):
-    return pwd_context.verify(password, hashed)
+    # Trunca para 72 bytes antes de verificar
+    return pwd_context.verify(password[:72], hashed)
 
 def create_token(data: dict):
     data = data.copy()
@@ -170,7 +172,6 @@ async def update_account(data: UserUpdate, current_user=Depends(get_user_from_to
     )
 
     return {"mensagem": "Conta atualizada"}
-
 
 
 # ----------- CHAT COM RAG VIA GROQ + MONGO -----------
