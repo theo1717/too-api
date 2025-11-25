@@ -1,4 +1,4 @@
-# rag_debug.py
+# rag.py
 import os
 import numpy as np
 from groq import Groq
@@ -6,8 +6,6 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import httpx
 import logging
-
-logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 
@@ -33,49 +31,46 @@ client = AsyncIOMotorClient(MONGO_URI)
 db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
-MODEL_EMBED = "text-embedding-3-small"       # embeddings
-MODEL_LLM = "llama-3.1-8b-instant"      # LLM
+# Modelos válidos para sua conta
+MODEL_EMBED = "groq/compound-mini"  # para embeddings
+MODEL_LLM = "groq/compound-mini"    # para chat
 
-# -------- FUNÇÃO 1: gerar embedding via API --------
-async def get_embedding(text: str, fallback_size=1024):
+# -------- FUNÇÃO 1: gerar embedding --------
+async def get_embedding(text: str):
     if not groq_client:
         logging.warning("Groq client não disponível, retornando embedding vazio")
-        return np.zeros(fallback_size)
+        return np.zeros(1024)
 
     try:
-        response = groq_client.embeddings.create(model=MODEL_EMBED, input=text)
-        embedding = np.array(response.data[0].embedding)
-        logging.info(f"Embedding gerado, tamanho: {embedding.shape}")
-        return embedding
+        response = groq_client.embeddings.create(
+            model=MODEL_EMBED,
+            input=text
+        )
+        return np.array(response.data[0].embedding)
     except Exception as e:
         logging.error(f"Erro ao gerar embedding: {e}")
-        return np.zeros(fallback_size)
+        return np.zeros(1024)
 
-# -------- FUNÇÃO 2: buscar top-k embeddings mais parecidos no Mongo --------
+# -------- FUNÇÃO 2: buscar top-k documentos similares --------
 async def search_similar_docs(query_embedding, k=3):
     results = []
     try:
         async for doc in collection_embeddings.find():
             doc_emb = np.array(doc["embedding"])
-            if doc_emb.shape != query_embedding.shape:
-                logging.warning(f"Tamanho do embedding do doc ({doc_emb.shape}) "
-                                f"diferente do query ({query_embedding.shape}), ignorando.")
-                continue
-            similarity = np.dot(query_embedding, doc_emb) / (
-                np.linalg.norm(query_embedding) * np.linalg.norm(doc_emb) + 1e-10
-            )
+            q_emb = np.array(query_embedding)
+            similarity = np.dot(q_emb, doc_emb) / (np.linalg.norm(q_emb) * np.linalg.norm(doc_emb) + 1e-10)
             results.append((similarity, doc["text"]))
+
         results.sort(key=lambda x: x[0], reverse=True)
-        logging.info(f"Top {k} documentos mais similares: {[r[0] for r in results[:k]]}")
         top_texts = [r[1] for r in results[:k]]
-        return "\n".join(top_texts) if top_texts else "Nenhum contexto relevante encontrado."
+        logging.info(f"Top {k} documentos mais similares: {[r[0] for r in results[:k]]}")
+        return "\n".join(top_texts)
     except Exception as e:
         logging.error(f"Erro ao buscar documentos similares: {e}")
         return "Não foi possível buscar contexto relevante."
 
-# -------- FUNÇÃO 3: gerar resposta com contexto --------
+# -------- FUNÇÃO 3: gerar resposta com RAG --------
 async def rag_answer(query: str):
-    logging.info(f"Recebido query: {query}")
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
 
@@ -93,7 +88,7 @@ Responda de forma clara e objetiva.
     logging.info(f"Prompt para LLM:\n{prompt}")
 
     if not groq_client:
-        logging.warning("Groq client não disponível, retornando mensagem fallback")
+        logging.warning("Groq client não disponível, retornando fallback")
         return "Desculpe, não consigo gerar resposta no momento."
 
     try:
@@ -105,9 +100,16 @@ Responda de forma clara e objetiva.
             ],
             max_tokens=300
         )
-        answer = response.choices[0].message["content"]
-        logging.info(f"Resposta gerada: {answer}")
-        return answer
+
+        # ✅ Corrige acesso à resposta
+        message_obj = response.choices[0].message
+        if hasattr(message_obj, "content"):
+            return message_obj.content
+        elif isinstance(message_obj, list):
+            return " ".join([m.content for m in message_obj])
+        else:
+            return str(message_obj)
+
     except Exception as e:
         logging.error(f"Erro ao gerar resposta: {e}")
         return "Desculpe, ocorreu um erro ao gerar a resposta."
