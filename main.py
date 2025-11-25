@@ -1,3 +1,4 @@
+# main.py
 import os
 import uvicorn
 from fastapi import FastAPI, HTTPException, Depends
@@ -8,24 +9,16 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.context import CryptContext
+from fastapi.security import OAuth2PasswordBearer
 
-# === RAG / LangChain ===
-from langchain_community.llms import HuggingFacePipeline
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema import AIMessage, HumanMessage
-from langchain.chains.retrieval_qa.base import RetrievalQA
-
-# === Transformers ===
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+# ---------- IMPORTA O RAG SEPARADO ----------
+from rag import load_vectorstore, config_rag_chain, chat_iteration
 
 load_dotenv()
 
 app = FastAPI()
 
-# --- CORS ---
+# ---------- CORS ----------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -38,25 +31,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- MongoDB ---
+# ---------- MONGODB ----------
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada no .env")
 
 client = AsyncIOMotorClient(MONGO_URI)
+
 db_users = client.users
 collection_users = db_users.get_collection("too_users")
 
 db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
-# --- Segurança ---
+# ---------- SEGURANÇA ----------
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = "CHAVE_MUITO_SECRETA"
+
+SECRET_KEY = os.getenv("SECRET_KEY", "CHAVE_MUITO_SECRETA")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
-# --- Models Pydantic ---
+oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
+
+
+# ---------- MODELS ----------
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
@@ -73,7 +71,8 @@ class ChatRequest(BaseModel):
     chat_id: str | None = None
     message: str
 
-# --- Auxiliares ---
+
+# ---------- FUNÇÕES ----------
 def hash_password(password):
     return pwd_context.hash(password)
 
@@ -84,10 +83,6 @@ def create_token(data: dict):
     data = data.copy()
     data["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
-
-# --- Token dependency ---
-from fastapi.security import OAuth2PasswordBearer
-oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
 
 async def get_user_from_token(token: str = Depends(oauth2)):
     try:
@@ -106,66 +101,20 @@ async def get_user_from_token(token: str = Depends(oauth2)):
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
 
-# === LLM (Google GEMMA 2B IT) ===
-llm_model_id = "google/gemma-2b-it"
-embedding_model_name = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
 
-tokenizer = AutoTokenizer.from_pretrained(llm_model_id)
-
-model = AutoModelForCausalLM.from_pretrained(
-    llm_model_id,
-    torch_dtype=torch.float32,
-    device_map=None  # força CPU
-)
-
-hf_pipe = pipeline(
-    "text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    max_new_tokens=256,
-    temperature=0.4,
-    top_p=0.9,
-    device=-1  # CPU
-)
-
-llm = HuggingFacePipeline(pipeline=hf_pipe)
-
-# === Carregar FAISS ===
-if os.path.exists("index_faiss"):
-    vectorstore = FAISS.load_local(
-        "index_faiss",
-        HuggingFaceEmbeddings(model_name=embedding_model_name),
-        allow_dangerous_deserialization=True
-    )
-else:
-    vectorstore = None
-
+# ---------- INICIALIZAR RAG ----------
+vectorstore = load_vectorstore()
 retriever = vectorstore.as_retriever(search_kwargs={"k": 3}) if vectorstore else None
+rag_chain = config_rag_chain(retriever) if retriever else None
+
 chat_histories = {}
 
-# === RAG ===
-def config_rag_chain(llm, retriever):
-    system_prompt = "Você é Too, assistente virtual da Tecnotooling. Responda em português de forma clara e objetiva."
 
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        return_source_documents=False
-    )
-
-    return qa_chain
-
-def chat_iteration(rag_chain, user_input, messages):
-    messages.append(HumanMessage(content=user_input))
-    resp = rag_chain.run(user_input)
-    messages.append(AIMessage(content=resp))
-    return resp
-
-# === Rotas ===
+# ---------- ROTAS ----------
 @app.get("/")
 async def root():
     return {"mensagem": "API funcionando!"}
+
 
 @app.post("/register")
 async def register_user(user: UserRegister):
@@ -177,19 +126,20 @@ async def register_user(user: UserRegister):
     new_user = {"email": user.email, "password": hashed}
 
     result = await collection_users.insert_one(new_user)
+
     return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
+
 
 @app.post("/login")
 async def login(data: LoginRequest):
-    username = data.username
-    password = data.password
+    user = await collection_users.find_one({"email": data.username})
 
-    user = await collection_users.find_one({"email": username})
-    if not user or not verify_password(password, user["password"]):
+    if not user or not verify_password(data.password, user["password"]):
         raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
 
     token = create_token({"sub": user["email"]})
     return {"access_token": token, "token_type": "bearer"}
+
 
 @app.get("/users")
 async def list_users(current_user=Depends(get_user_from_token)):
@@ -198,15 +148,18 @@ async def list_users(current_user=Depends(get_user_from_token)):
         users.append({"email": u["email"], "id": str(u["_id"])})
     return users
 
+
 @app.post("/validate-email")
 async def validate_email(email: EmailStr):
     exists = await collection_users.find_one({"email": email})
     return {"exists": bool(exists)}
 
+
 @app.delete("/delete-account")
 async def delete_account(current_user=Depends(get_user_from_token)):
     await collection_users.delete_one({"email": current_user["email"]})
     return {"mensagem": "Conta deletada"}
+
 
 @app.put("/update-account")
 async def update_account(data: UserUpdate, current_user=Depends(get_user_from_token)):
@@ -227,20 +180,29 @@ async def update_account(data: UserUpdate, current_user=Depends(get_user_from_to
 
     return {"mensagem": "Conta atualizada"}
 
+
 @app.post("/chat")
 async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     if not retriever:
-        raise HTTPException(status_code=500, detail="RAG não inicializado")
+        raise HTTPException(status_code=500, detail="RAG não inicializado.")
 
     chat_id = req.chat_id or str(datetime.utcnow().timestamp())
-    if chat_id not in chat_histories:
-        chat_histories[chat_id] = {"messages": []}
 
-    messages = chat_histories[chat_id]["messages"]
-    rag_chain = config_rag_chain(llm, retriever)
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = []
+
+    messages = chat_histories[chat_id]
+
     answer = chat_iteration(rag_chain, req.message, messages)
 
     return {"answer": answer, "chat_id": chat_id}
 
+
+# ---------- MAIN ----------
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )
