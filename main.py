@@ -34,7 +34,7 @@ app.add_middleware(
 # ---------- MONGODB ----------
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
-    raise Exception("Erro: MONGO_URI não encontrada no .env")
+    raise Exception("Erro: MONGO_URI não encontrada nas variáveis de ambiente.")
 
 client = AsyncIOMotorClient(MONGO_URI)
 
@@ -104,8 +104,7 @@ async def get_user_from_token(token: str = Depends(oauth2)):
 
 # ---------- INICIALIZAR RAG ----------
 vectorstore = load_vectorstore()
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3}) if vectorstore else None
-rag_chain = config_rag_chain(retriever) if retriever else None
+rag_chain = config_rag_chain()
 
 chat_histories = {}
 
@@ -116,6 +115,7 @@ async def root():
     return {"mensagem": "API funcionando!"}
 
 
+# ----------- AUTH ---------------
 @app.post("/register")
 async def register_user(user: UserRegister):
     existing = await collection_users.find_one({"email": user.email})
@@ -146,6 +146,7 @@ async def list_users(current_user=Depends(get_user_from_token)):
     users = []
     async for u in collection_users.find():
         users.append({"email": u["email"], "id": str(u["_id"])})
+
     return users
 
 
@@ -181,10 +182,9 @@ async def update_account(data: UserUpdate, current_user=Depends(get_user_from_to
     return {"mensagem": "Conta atualizada"}
 
 
+# ------------- CHAT COM RAG + GROQ -------------
 @app.post("/chat")
 async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
-    if not retriever:
-        raise HTTPException(status_code=500, detail="RAG não inicializado.")
 
     chat_id = req.chat_id or str(datetime.utcnow().timestamp())
 
@@ -193,7 +193,7 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
 
     messages = chat_histories[chat_id]
 
-    answer = chat_iteration(rag_chain, req.message, messages)
+    answer = chat_iteration(req.message, messages)
 
     return {"answer": answer, "chat_id": chat_id}
 

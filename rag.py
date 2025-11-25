@@ -1,85 +1,75 @@
 # rag.py
+import os
+from groq import Groq
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import FAISS
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
 
+GROQ_KEY = os.getenv("GROQ_API_KEY")
 
 class RAGPipeline:
     def __init__(self):
         self.embedder = None
         self.vectorstore = None
-        self.tokenizer = None
-        self.lm_model = None
+        self.client = None
+        self.model_name = "gemma2-9b-it"
 
     def load(self):
-        print("\n🔄 Carregando modelos de IA (RAG)...")
+        print("\n🔄 Carregando embeddings + Groq...")
 
-        # Embeddings
+        # Embeddings locais (muito leves)
         self.embedder = SentenceTransformerEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
 
-        # Cria índice FAISS com texto inicial
+        # Vetor FAISS inicial
         self.vectorstore = FAISS.from_texts(
             ["Sistema iniciado."],
             self.embedder
         )
 
-        # Modelo da Google (Gemma)
-        model_name = "google/gemma-2-2b-it"
+        # Cliente Groq
+        self.client = Groq(api_key=GROQ_KEY)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-        self.lm_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map="auto"
-        )
-
-        print("✅ Modelos carregados com sucesso.\n")
+        print("✅ RAG carregado com Groq.\n")
 
     def ask(self, query: str):
         # 1. Busca semântica
         docs = self.vectorstore.similarity_search(query, k=3)
         context = "\n".join([d.page_content for d in docs])
 
-        # 2. Prompt
-        prompt = f"Contexto:\n{context}\n\nPergunta: {query}\nResposta:"
+        # 2. Prompt final
+        prompt = f"""
+Use o contexto abaixo para responder a pergunta.
 
-        inputs = self.tokenizer(
-            prompt,
-            return_tensors="pt"
-        ).to(self.lm_model.device)
+Contexto:
+{context}
 
-        output = self.lm_model.generate(
-            **inputs,
-            max_new_tokens=256,
-            temperature=0.2
+Pergunta:
+{query}
+
+Resposta:
+"""
+
+        # 3. Chamada ao Groq
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[ {"role": "user", "content": prompt} ],
+            temperature=0.2,
+            max_tokens=300
         )
 
-        return self.tokenizer.decode(output[0], skip_special_tokens=True)
+        return response.choices[0].message["content"]
 
 
-# ------------ Instância global ------------
+# Instância global
 rag_pipeline = RAGPipeline()
 
-
-# -----------------------------------------
-# FUNÇÕES QUE VOCÊ QUERIA MANTER
-# -----------------------------------------
-
 def load_vectorstore():
-    """Carrega embeddings, modelo e FAISS."""
     rag_pipeline.load()
     return rag_pipeline.vectorstore
 
-
-def config_rag_chain():
-    """Retorna a instância configurada do pipeline."""
+def config_rag_chain(_=None):
     return rag_pipeline
 
-
-def chat_iteration(question: str):
-    """Executa uma geração única no modelo."""
-    return rag_pipeline.ask(question)
+def chat_iteration(rag_chain, message, _messages):
+    return rag_chain.ask(message)
