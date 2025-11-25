@@ -37,22 +37,17 @@ if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada.")
 
 client = AsyncIOMotorClient(MONGO_URI)
-
 db_users = client.users
 collection_users = db_users.get_collection("too_users")
-
 db_chats = client.chats
 collection_history = db_chats.get_collection("history")
 
 # --- SEGURANÇA ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 SECRET_KEY = os.getenv("SECRET_KEY", "CHAVE_MUITO_SECRETA")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
-
 oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
-
 
 # --- MODELS ---
 class UserRegister(BaseModel):
@@ -71,7 +66,6 @@ class ChatRequest(BaseModel):
     chat_id: str | None = None
     message: str
 
-
 # --- FUNÇÕES AUXILIARES ---
 def hash_password(password):
     return pwd_context.hash(password[:72])
@@ -88,92 +82,38 @@ async def get_user_from_token(token: str = Depends(oauth2)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email = payload.get("sub")
-
         if not email:
             raise HTTPException(status_code=401, detail="Token inválido")
-
         user = await collection_users.find_one({"email": email})
         if not user:
             raise HTTPException(status_code=401, detail="Usuário não encontrado")
-
         return user
-
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
-
 
 # --- ROTAS ---
 @app.get("/")
 async def root():
     return {"mensagem": "API funcionando!"}
 
-
-# --- AUTH ---
 @app.post("/register")
 async def register_user(user: UserRegister):
     existing = await collection_users.find_one({"email": user.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email já registrado")
-
     hashed = hash_password(user.password)
     new_user = {"email": user.email, "password": hashed}
     result = await collection_users.insert_one(new_user)
-
     return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
-
 
 @app.post("/login")
 async def login(data: LoginRequest):
     user = await collection_users.find_one({"email": data.username})
-
     if not user or not verify_password(data.password, user["password"]):
         raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
-
     token = create_token({"sub": user["email"]})
     return {"access_token": token, "token_type": "bearer"}
 
-
-@app.get("/users")
-async def list_users(current_user=Depends(get_user_from_token)):
-    users = []
-    async for u in collection_users.find():
-        users.append({"email": u["email"], "id": str(u["_id"])})
-    return users
-
-
-@app.post("/validate-email")
-async def validate_email(email: EmailStr):
-    exists = await collection_users.find_one({"email": email})
-    return {"exists": bool(exists)}
-
-
-@app.delete("/delete-account")
-async def delete_account(current_user=Depends(get_user_from_token)):
-    await collection_users.delete_one({"email": current_user["email"]})
-    return {"mensagem": "Conta deletada"}
-
-
-@app.put("/update-account")
-async def update_account(data: UserUpdate, current_user=Depends(get_user_from_token)):
-    update_data = {}
-
-    if data.email:
-        update_data["email"] = data.email
-    if data.password:
-        update_data["password"] = hash_password(data.password)
-
-    if not update_data:
-        raise HTTPException(status_code=400, detail="Nenhum campo enviado")
-
-    await collection_users.update_one(
-        {"email": current_user["email"]},
-        {"$set": update_data}
-    )
-
-    return {"mensagem": "Conta atualizada"}
-
-
-# --- CHAT RAG + HISTÓRICO ---
 @app.post("/chat")
 async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     chat_id = req.chat_id or str(datetime.utcnow().timestamp())
@@ -181,6 +121,7 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     # Salva a mensagem do usuário
     user_msg = {
         "chat_id": chat_id,
+        "user_email": current_user["email"],
         "sender": "user",
         "text": req.message,
         "timestamp": datetime.utcnow()
@@ -193,23 +134,27 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     # Salva a resposta do bot
     bot_msg = {
         "chat_id": chat_id,
+        "user_email": current_user["email"],
         "sender": "bot",
         "text": answer_text,
         "timestamp": datetime.utcnow()
     }
     await collection_history.insert_one(bot_msg)
 
+    # Retorna o chat_id para referência
     return {"answer": answer_text, "chat_id": chat_id}
-
 
 @app.get("/chat-history/{chat_id}")
 async def chat_history(chat_id: str, current_user=Depends(get_user_from_token)):
     history = []
-    cursor = collection_history.find({"chat_id": chat_id}).sort("timestamp", 1)
+    cursor = collection_history.find({"chat_id": chat_id, "user_email": current_user["email"]}).sort("timestamp", 1)
     async for msg in cursor:
-        history.append({"sender": msg["sender"], "text": msg["text"]})
+        history.append({
+            "sender": msg["sender"],
+            "text": msg["text"],
+            "timestamp": msg["timestamp"].isoformat()
+        })
     return {"messages": history}
-
 
 # --- MAIN ---
 if __name__ == "__main__":

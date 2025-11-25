@@ -32,8 +32,8 @@ db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
 # Modelos válidos para sua conta
-MODEL_EMBED = "groq/compound-mini"  # para embeddings
-MODEL_LLM = "groq/compound-mini"    # para chat
+MODEL_EMBED = "groq/compound-mini"  # embeddings
+MODEL_LLM = "groq/compound-mini"    # chat
 
 # -------- FUNÇÃO 1: gerar embedding --------
 async def get_embedding(text: str):
@@ -75,7 +75,8 @@ async def rag_answer(query: str):
     context = await search_similar_docs(query_emb)
 
     prompt = f"""
-Você é um assistente útil.
+Você é o assistente virtual da empresa TecnoTooling chamado "Too". 
+Seu objetivo é fornecer respostas objetivas e claras usando o CONTEXTO RELEVANTE abaixo.
 
 CONTEXTO RELEVANTE:
 {context}
@@ -83,7 +84,7 @@ CONTEXTO RELEVANTE:
 PERGUNTA:
 {query}
 
-Responda de forma clara e objetiva.
+Responda de forma direta, profissional e concisa, sem incluir informações irrelevantes
 """
     logging.info(f"Prompt para LLM:\n{prompt}")
 
@@ -101,7 +102,6 @@ Responda de forma clara e objetiva.
             max_tokens=300
         )
 
-        # ✅ Corrige acesso à resposta
         message_obj = response.choices[0].message
         if hasattr(message_obj, "content"):
             return message_obj.content
