@@ -10,10 +10,13 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 # RAG imports
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain.llms import HuggingFacePipeline
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.chains import RetrievalQA
 from langchain.vectorstores import FAISS
 from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.schema import AIMessage, HumanMessage
+from transformers import pipeline
 
 load_dotenv()
 
@@ -102,10 +105,11 @@ async def get_user_from_token(token: str = Depends(oauth2)):
         raise HTTPException(status_code=401, detail="Token inválido")
 
 # --- Inicializa LLM + embeddings RAG ---
-llm_model_id = os.getenv("LLM_MODEL_ID", "deepseek-r1-distill-llama-70b")
+llm_model_id = os.getenv("LLM_MODEL_ID", "decapoda-research/llama-7b-hf")  # exemplo
 embedding_model_name = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
 
-llm = ChatGroq(model=llm_model_id, temperature=0.7)
+hf_pipe = pipeline("text-generation", model=llm_model_id, max_new_tokens=512)
+llm = HuggingFacePipeline(pipeline=hf_pipe)
 
 # Carregar FAISS index local ou criar se não existir
 if os.path.exists("index_faiss"):
@@ -123,19 +127,16 @@ def config_rag_chain(llm, retriever):
     qa_prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         MessagesPlaceholder("chat_history"),
-        ("human", "Pergunta: {input}\n\n Contexto: {context}")
+        ("human", "Pergunta: {input}\n\nContexto: {context}")
     ])
-    from langchain.chains import create_retrieval_chain, create_stuff_documents_chain, create_history_aware_retriever
-    history_retriever = create_history_aware_retriever(llm=llm, retriever=retriever, prompt=qa_prompt)
-    qa_chain = create_stuff_documents_chain(llm, qa_prompt)
-    return create_retrieval_chain(history_retriever, qa_chain)
+    qa_chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever, return_source_documents=False)
+    return qa_chain
 
 def chat_iteration(rag_chain, user_input, messages):
     messages.append(HumanMessage(content=user_input))
-    resp = rag_chain.invoke({"input": user_input, "chat_history": messages})
-    answer = resp.get("answer", "")
-    messages.append(AIMessage(content=answer))
-    return answer
+    resp = rag_chain.run({"query": user_input})
+    messages.append(AIMessage(content=resp))
+    return resp
 
 # --- Rotas ---
 @app.get("/")
@@ -175,6 +176,7 @@ async def list_users(current_user=Depends(get_user_from_token)):
     users = []
     async for u in collection_users.find():
         users.append({"email": u["email"], "id": str(u["_id"])})
+
     return users
 
 # VALIDATE EMAIL
