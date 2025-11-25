@@ -9,13 +9,14 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
-# RAG imports
-from langchain.llms import HuggingFacePipeline
+# === RAG IMPORTS (LangChain moderno) ===
+from langchain_community.llms import HuggingFacePipeline
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.chains import RetrievalQA
-from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.schema import AIMessage, HumanMessage
+from langchain.chains.retrieval_qa.base import RetrievalQA
+
 from transformers import pipeline
 
 load_dotenv()
@@ -105,45 +106,56 @@ async def get_user_from_token(token: str = Depends(oauth2)):
         raise HTTPException(status_code=401, detail="Token inválido")
 
 # --- Inicializa LLM + embeddings RAG ---
-llm_model_id = os.getenv("LLM_MODEL_ID", "decapoda-research/llama-7b-hf")  # exemplo
+llm_model_id = os.getenv("LLM_MODEL_ID", "decapoda-research/llama-7b-hf")
 embedding_model_name = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
 
 hf_pipe = pipeline("text-generation", model=llm_model_id, max_new_tokens=512)
 llm = HuggingFacePipeline(pipeline=hf_pipe)
 
-# Carregar FAISS index local ou criar se não existir
+# --- Carregar FAISS ---
 if os.path.exists("index_faiss"):
-    vectorstore = FAISS.load_local("index_faiss", HuggingFaceEmbeddings(model_name=embedding_model_name))
+    vectorstore = FAISS.load_local(
+        "index_faiss",
+        HuggingFaceEmbeddings(model_name=embedding_model_name),
+        allow_dangerous_deserialization=True
+    )
 else:
     vectorstore = None
 
-retriever = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k":3, "fetch_k":4}) if vectorstore else None
+retriever = vectorstore.as_retriever(search_kwargs={"k": 3}) if vectorstore else None
 
-chat_histories = {}  # Em memória. Pode migrar para MongoDB se quiser persistência.
+chat_histories = {}
 
-# --- Funções RAG ---
+# === Funções RAG ===
 def config_rag_chain(llm, retriever):
     system_prompt = "Você é Too, assistente virtual da Tecnotooling. Responda em português, claro e objetivo."
+
     qa_prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         MessagesPlaceholder("chat_history"),
         ("human", "Pergunta: {input}\n\nContexto: {context}")
     ])
-    qa_chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever, return_source_documents=False)
+
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=retriever,
+        return_source_documents=False
+    )
+
     return qa_chain
 
 def chat_iteration(rag_chain, user_input, messages):
     messages.append(HumanMessage(content=user_input))
-    resp = rag_chain.run({"query": user_input})
+    resp = rag_chain.run(user_input)
     messages.append(AIMessage(content=resp))
     return resp
 
-# --- Rotas ---
+# === Rotas ===
 @app.get("/")
 async def root():
     return {"mensagem": "API funcionando!"}
 
-# REGISTER
 @app.post("/register")
 async def register_user(user: UserRegister):
     existing = await collection_users.find_one({"email": user.email})
@@ -156,7 +168,6 @@ async def register_user(user: UserRegister):
     result = await collection_users.insert_one(new_user)
     return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
 
-# LOGIN
 @app.post("/login")
 async def login(data: LoginRequest):
     username = data.username
@@ -170,7 +181,6 @@ async def login(data: LoginRequest):
     token = create_token({"sub": user["email"]})
     return {"access_token": token, "token_type": "bearer"}
 
-# LIST USERS
 @app.get("/users")
 async def list_users(current_user=Depends(get_user_from_token)):
     users = []
@@ -179,19 +189,16 @@ async def list_users(current_user=Depends(get_user_from_token)):
 
     return users
 
-# VALIDATE EMAIL
 @app.post("/validate-email")
 async def validate_email(email: EmailStr):
     exists = await collection_users.find_one({"email": email})
     return {"exists": bool(exists)}
 
-# DELETE ACCOUNT
 @app.delete("/delete-account")
 async def delete_account(current_user=Depends(get_user_from_token)):
     await collection_users.delete_one({"email": current_user["email"]})
     return {"mensagem": "Conta deletada"}
 
-# UPDATE ACCOUNT
 @app.put("/update-account")
 async def update_account(data: UserUpdate, current_user=Depends(get_user_from_token)):
     update_data = {}
@@ -211,12 +218,11 @@ async def update_account(data: UserUpdate, current_user=Depends(get_user_from_to
 
     return {"mensagem": "Conta atualizada"}
 
-# --- ROTA DE CHAT RAG ---
 @app.post("/chat")
 async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     if not retriever:
         raise HTTPException(status_code=500, detail="RAG não inicializado")
-    
+
     chat_id = req.chat_id or str(datetime.utcnow().timestamp())
     if chat_id not in chat_histories:
         chat_histories[chat_id] = {"messages": []}
@@ -224,6 +230,7 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     messages = chat_histories[chat_id]["messages"]
     rag_chain = config_rag_chain(llm, retriever)
     answer = chat_iteration(rag_chain, req.message, messages)
+
     return {"answer": answer, "chat_id": chat_id}
 
 if __name__ == "__main__":
