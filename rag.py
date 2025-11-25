@@ -1,75 +1,94 @@
 # rag.py
 import os
+import numpy as np
 from groq import Groq
-from langchain_community.embeddings import SentenceTransformerEmbeddings
-from langchain_community.vectorstores import FAISS
+from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
 
-GROQ_KEY = os.getenv("GROQ_API_KEY")
+load_dotenv()
 
-class RAGPipeline:
-    def __init__(self):
-        self.embedder = None
-        self.vectorstore = None
-        self.client = None
-        self.model_name = "gemma2-9b-it"
+# ---- CONFIG ----
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MONGO_URI = os.getenv("MONGO_URI")
 
-    def load(self):
-        print("\n🔄 Carregando embeddings + Groq...")
+if not GROQ_API_KEY:
+    raise Exception("Erro: GROQ_API_KEY não encontrada.")
+if not MONGO_URI:
+    raise Exception("Erro: MONGO_URI não encontrada.")
 
-        # Embeddings locais (muito leves)
-        self.embedder = SentenceTransformerEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+# ---- MONGO ----
+client = AsyncIOMotorClient(MONGO_URI)
+db_embeddings = client.file_data
+collection_embeddings = db_embeddings.get_collection("embeddings")
+
+MODEL_EMBED = "llama-3.2-1b"  # modelo leve para embeddings
+MODEL_LLM = "llama-3.2-1b"    # mesmo modelo para resposta
+
+
+# -------- FUNÇÃO 1: gerar embedding via API --------
+async def get_embedding(text: str):
+    response = groq_client.embeddings.create(
+        model=MODEL_EMBED,
+        input=text
+    )
+    return response.data[0].embedding
+
+
+# -------- FUNÇÃO 2: buscar top-k embeddings mais parecidos no Mongo --------
+async def search_similar_docs(query_embedding, k=3):
+    results = []
+
+    async for doc in collection_embeddings.find():
+        doc_emb = np.array(doc["embedding"])
+        q_emb = np.array(query_embedding)
+
+        # cosine similarity
+        similarity = np.dot(q_emb, doc_emb) / (
+            np.linalg.norm(q_emb) * np.linalg.norm(doc_emb)
         )
 
-        # Vetor FAISS inicial
-        self.vectorstore = FAISS.from_texts(
-            ["Sistema iniciado."],
-            self.embedder
-        )
+        results.append((similarity, doc["text"]))
 
-        # Cliente Groq
-        self.client = Groq(api_key=GROQ_KEY)
+    # ordenar por similaridade
+    results.sort(key=lambda x: x[0], reverse=True)
 
-        print("✅ RAG carregado com Groq.\n")
+    top_texts = [r[1] for r in results[:k]]
 
-    def ask(self, query: str):
-        # 1. Busca semântica
-        docs = self.vectorstore.similarity_search(query, k=3)
-        context = "\n".join([d.page_content for d in docs])
-
-        # 2. Prompt final
-        prompt = f"""
-Use o contexto abaixo para responder a pergunta.
-
-Contexto:
-{context}
-
-Pergunta:
-{query}
-
-Resposta:
-"""
-
-        # 3. Chamada ao Groq
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[ {"role": "user", "content": prompt} ],
-            temperature=0.2,
-            max_tokens=300
-        )
-
-        return response.choices[0].message["content"]
+    return "\n".join(top_texts)
 
 
-# Instância global
-rag_pipeline = RAGPipeline()
+# -------- FUNÇÃO 3: gerar resposta com contexto --------
+async def rag_answer(query: str):
 
-def load_vectorstore():
-    rag_pipeline.load()
-    return rag_pipeline.vectorstore
+    # 1. Embedding da pergunta
+    query_emb = await get_embedding(query)
 
-def config_rag_chain(_=None):
-    return rag_pipeline
+    # 2. Busca no MongoDB
+    context = await search_similar_docs(query_emb)
 
-def chat_iteration(rag_chain, message, _messages):
-    return rag_chain.ask(message)
+    # 3. Monta prompt final
+    prompt = f"""
+    Você é um assistente útil.
+
+    CONTEXTO RELEVANTE:
+    {context}
+
+    PERGUNTA:
+    {query}
+
+    Responda de forma clara e objetiva.
+    """
+
+    # 4. Gera resposta
+    response = groq_client.chat.completions.create(
+        model=MODEL_LLM,
+        messages=[
+            {"role": "system", "content": "Você é um assistente útil."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=300
+    )
+
+    return response.choices[0].message["content"]

@@ -11,8 +11,8 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 
-# ---------- IMPORTA O RAG SEPARADO ----------
-from rag import load_vectorstore, config_rag_chain, chat_iteration
+# ---------- IMPORTA O NOVO RAG VIA API ----------
+from rag import rag_answer
 
 load_dotenv()
 
@@ -40,9 +40,6 @@ client = AsyncIOMotorClient(MONGO_URI)
 
 db_users = client.users
 collection_users = db_users.get_collection("too_users")
-
-db_embeddings = client.file_data
-collection_embeddings = db_embeddings.get_collection("embeddings")
 
 # ---------- SEGURANÇA ----------
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -100,13 +97,6 @@ async def get_user_from_token(token: str = Depends(oauth2)):
 
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
-
-
-# ---------- INICIALIZAR RAG ----------
-vectorstore = load_vectorstore()
-rag_chain = config_rag_chain()
-
-chat_histories = {}
 
 
 # ---------- ROTAS ----------
@@ -182,18 +172,14 @@ async def update_account(data: UserUpdate, current_user=Depends(get_user_from_to
     return {"mensagem": "Conta atualizada"}
 
 
-# ------------- CHAT COM RAG + GROQ -------------
+
+# ----------- CHAT COM RAG VIA GROQ + MONGO -----------
 @app.post("/chat")
 async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
 
     chat_id = req.chat_id or str(datetime.utcnow().timestamp())
 
-    if chat_id not in chat_histories:
-        chat_histories[chat_id] = []
-
-    messages = chat_histories[chat_id]
-
-    answer = chat_iteration(req.message, messages)
+    answer = await rag_answer(req.message)
 
     return {"answer": answer, "chat_id": chat_id}
 
