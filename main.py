@@ -11,14 +11,14 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 
-# Import do RAG atualizado (Groq)
+# --- RAG Import ---
 from rag import rag_answer
 
 load_dotenv()
 
 app = FastAPI()
 
-# ---------- CORS ----------
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -31,23 +31,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------- MONGODB ----------
+# --- MONGO ---
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
-    raise Exception("Erro: MONGO_URI não encontrada nas variáveis de ambiente.")
+    raise Exception("Erro: MONGO_URI não encontrada.")
 
 client = AsyncIOMotorClient(MONGO_URI)
+
 db_users = client.users
 collection_users = db_users.get_collection("too_users")
 
-# ---------- SEGURANÇA ----------
+db_chats = client.chats
+collection_history = db_chats.get_collection("history")
+
+# --- SEGURANÇA ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 SECRET_KEY = os.getenv("SECRET_KEY", "CHAVE_MUITO_SECRETA")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
 oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
 
-# ---------- MODELS ----------
+
+# --- MODELS ---
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
@@ -64,7 +71,8 @@ class ChatRequest(BaseModel):
     chat_id: str | None = None
     message: str
 
-# ---------- FUNÇÕES ----------
+
+# --- FUNÇÕES AUXILIARES ---
 def hash_password(password):
     return pwd_context.hash(password[:72])
 
@@ -80,6 +88,7 @@ async def get_user_from_token(token: str = Depends(oauth2)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email = payload.get("sub")
+
         if not email:
             raise HTTPException(status_code=401, detail="Token inválido")
 
@@ -88,40 +97,41 @@ async def get_user_from_token(token: str = Depends(oauth2)):
             raise HTTPException(status_code=401, detail="Usuário não encontrado")
 
         return user
+
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
 
-# ---------- ROTAS ----------
+
+# --- ROTAS ---
 @app.get("/")
 async def root():
     return {"mensagem": "API funcionando!"}
 
-# ----------- AUTH ---------------
+
+# --- AUTH ---
 @app.post("/register")
 async def register_user(user: UserRegister):
-    try:
-        existing = await collection_users.find_one({"email": user.email})
-        if existing:
-            raise HTTPException(status_code=400, detail="Email já registrado")
+    existing = await collection_users.find_one({"email": user.email})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email já registrado")
 
-        hashed = hash_password(user.password)
-        new_user = {"email": user.email, "password": hashed}
-        result = await collection_users.insert_one(new_user)
-        return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao registrar usuário: {str(e)}")
+    hashed = hash_password(user.password)
+    new_user = {"email": user.email, "password": hashed}
+    result = await collection_users.insert_one(new_user)
+
+    return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
+
 
 @app.post("/login")
 async def login(data: LoginRequest):
-    try:
-        user = await collection_users.find_one({"email": data.username})
-        if not user or not verify_password(data.password, user["password"]):
-            raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
+    user = await collection_users.find_one({"email": data.username})
 
-        token = create_token({"sub": user["email"]})
-        return {"access_token": token, "token_type": "bearer"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao fazer login: {str(e)}")
+    if not user or not verify_password(data.password, user["password"]):
+        raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
+
+    token = create_token({"sub": user["email"]})
+    return {"access_token": token, "token_type": "bearer"}
+
 
 @app.get("/users")
 async def list_users(current_user=Depends(get_user_from_token)):
@@ -130,23 +140,28 @@ async def list_users(current_user=Depends(get_user_from_token)):
         users.append({"email": u["email"], "id": str(u["_id"])})
     return users
 
+
 @app.post("/validate-email")
 async def validate_email(email: EmailStr):
     exists = await collection_users.find_one({"email": email})
     return {"exists": bool(exists)}
+
 
 @app.delete("/delete-account")
 async def delete_account(current_user=Depends(get_user_from_token)):
     await collection_users.delete_one({"email": current_user["email"]})
     return {"mensagem": "Conta deletada"}
 
+
 @app.put("/update-account")
 async def update_account(data: UserUpdate, current_user=Depends(get_user_from_token)):
     update_data = {}
+
     if data.email:
         update_data["email"] = data.email
     if data.password:
         update_data["password"] = hash_password(data.password)
+
     if not update_data:
         raise HTTPException(status_code=400, detail="Nenhum campo enviado")
 
@@ -154,19 +169,49 @@ async def update_account(data: UserUpdate, current_user=Depends(get_user_from_to
         {"email": current_user["email"]},
         {"$set": update_data}
     )
+
     return {"mensagem": "Conta atualizada"}
 
-# ----------- CHAT COM RAG VIA GROQ + MONGO -----------
+
+# --- CHAT RAG + HISTÓRICO ---
 @app.post("/chat")
 async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
-    try:
-        chat_id = req.chat_id or str(datetime.utcnow().timestamp())
-        answer = await rag_answer(req.message)
-        return {"answer": answer, "chat_id": chat_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro no chat: {str(e)}")
+    chat_id = req.chat_id or str(datetime.utcnow().timestamp())
 
-# ---------- MAIN ----------
+    # Salva a mensagem do usuário
+    user_msg = {
+        "chat_id": chat_id,
+        "sender": "user",
+        "text": req.message,
+        "timestamp": datetime.utcnow()
+    }
+    await collection_history.insert_one(user_msg)
+
+    # Gera resposta com RAG
+    answer_text = await rag_answer(req.message)
+
+    # Salva a resposta do bot
+    bot_msg = {
+        "chat_id": chat_id,
+        "sender": "bot",
+        "text": answer_text,
+        "timestamp": datetime.utcnow()
+    }
+    await collection_history.insert_one(bot_msg)
+
+    return {"answer": answer_text, "chat_id": chat_id}
+
+
+@app.get("/chat-history/{chat_id}")
+async def chat_history(chat_id: str, current_user=Depends(get_user_from_token)):
+    history = []
+    cursor = collection_history.find({"chat_id": chat_id}).sort("timestamp", 1)
+    async for msg in cursor:
+        history.append({"sender": msg["sender"], "text": msg["text"]})
+    return {"messages": history}
+
+
+# --- MAIN ---
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
