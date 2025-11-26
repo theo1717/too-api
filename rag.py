@@ -1,35 +1,22 @@
 # rag.py
 import os
 import numpy as np
-from groq import Groq
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import httpx
 import logging
-import asyncio
 
 load_dotenv()
 
 # ---- CONFIG ----
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 HF_TOKEN = os.getenv("HF_TOKEN")  # Token Hugging Face
-HF_MODEL = "BAAI/bge-m3-small"   # Modelo Hugging Face embeddings
+HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # Modelo gratuito Hugging Face
 
-if not GROQ_API_KEY:
-    raise Exception("Erro: GROQ_API_KEY não encontrada.")
 if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada.")
 if not HF_TOKEN:
     raise Exception("Erro: HF_TOKEN não encontrada.")
-
-# ---- CLIENTE GROQ ----
-try:
-    http_client = httpx.Client()
-    groq_client = Groq(api_key=GROQ_API_KEY, http_client=http_client)
-except Exception as e:
-    logging.error(f"Falha ao inicializar Groq: {e}")
-    groq_client = None
 
 # ---- MONGO ----
 client = AsyncIOMotorClient(MONGO_URI)
@@ -52,7 +39,7 @@ async def get_embedding(text: str) -> np.ndarray:
             return emb
         except Exception as e:
             logging.error(f"Erro ao gerar embedding HF: {e}")
-            return np.zeros(1024)  # dimensão do BGE-M3-Small
+            return np.zeros(384)  # dimensão do MiniLM
 
 # ---- FUNÇÃO 2: buscar top-k documentos similares ----
 async def search_similar_docs(query_embedding, k=3):
@@ -69,18 +56,16 @@ async def search_similar_docs(query_embedding, k=3):
 
         results.sort(key=lambda x: x[0], reverse=True)
         top_texts = [r[1] for r in results[:k]]
-        logging.info(f"Top {k} documentos mais similares: {[r[0] for r in results[:k]]}")
         return "\n".join(top_texts)
     except Exception as e:
         logging.error(f"Erro ao buscar documentos similares: {e}")
-        return "Não foi possível buscar contexto relevante."
+        return ""
 
-# ---- FUNÇÃO 3: construir prompt amigável ----
+# ---- FUNÇÃO 3: construir prompt objetivo ----
 def build_too_prompt(user_message: str, context: str) -> str:
     return f"""
-Você é o Too, um assistente virtual da TecnoTooling super amigável, querido e receptivo.
-Sempre responda de forma acolhedora, clara e gentil, como se estivesse ajudando um amigo.
-Use o CONTEXTO RELEVANTE abaixo para responder de forma precisa.
+Você é o Too, assistente virtual da TecnoTooling.
+Seja objetivo, conciso e útil, usando apenas o CONTEXTO RELEVANTE abaixo.
 
 CONTEXTO RELEVANTE:
 {context}
@@ -88,59 +73,26 @@ CONTEXTO RELEVANTE:
 PERGUNTA DO USUÁRIO:
 {user_message}
 
-Responda como o Too, sendo útil, simpático e empático.
+Responda de forma direta e clara, sem cumprimentos desnecessários.
 """
 
-# ---- FUNÇÃO 4: gerar resposta com RAG via Groq ----
+# ---- FUNÇÃO 4: gerar resposta com RAG ----
 async def rag_answer(query: str, chat_id: str = None, user_email: str = None):
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
 
-    # Verifica se é a primeira mensagem do chat
+    # ---- Saudação inicial apenas se primeira mensagem do chat ----
     saudacao_inicial = ""
     if chat_id and user_email:
-        previous_msgs = collection_embeddings.count_documents({"chat_id": chat_id})
-        if previous_msgs == 0:
-            saudacao_inicial = "Oi! Tudo bem? 😊 "
+        previous_msgs_count = await collection_embeddings.count_documents({"chat_id": chat_id})
+        if previous_msgs_count == 0:
+            saudacao_inicial = "Oi! 😊 Aqui é o Too, seu assistente. "
 
-    prompt = f"""
-{saudacao_inicial}
-Você é o Too, um assistente virtual da TecnoTooling super amigável, querido e receptivo.
-Sempre responda de forma acolhedora, clara e gentil, como se estivesse ajudando um amigo.
-Use o CONTEXTO RELEVANTE abaixo para responder de forma precisa.
+    prompt = saudacao_inicial + build_too_prompt(query, context)
+    logging.info(f"Prompt gerado:\n{prompt}")
 
-CONTEXTO RELEVANTE:
-{context}
+    # ---- Chamando LLM (exemplo Groq ou outro) ----
+    # Aqui colocamos apenas fallback de teste
+    response_text = prompt  # substitua pela chamada real do LLM se desejar
 
-PERGUNTA DO USUÁRIO:
-{query}
-
-Responda como o Too, sendo útil, simpático e empático.
-"""
-
-    logging.info(f"Prompt para LLM:\n{prompt}")
-
-    if not groq_client:
-        logging.warning("Groq client não disponível, retornando fallback")
-        return "Desculpe, não consigo gerar resposta no momento."
-
-    try:
-        response = groq_client.chat.completions.create(
-            model="groq/compound-mini",
-            messages=[
-                {"role": "system", "content": "Você é um assistente útil e amigável."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300
-        )
-        message_obj = response.choices[0].message
-        if hasattr(message_obj, "content"):
-            return message_obj.content
-        elif isinstance(message_obj, list):
-            return " ".join([m.content for m in message_obj])
-        else:
-            return str(message_obj)
-
-    except Exception as e:
-        logging.error(f"Erro ao gerar resposta: {e}")
-        return "Desculpe, ocorreu um erro ao gerar a resposta."
+    return response_text

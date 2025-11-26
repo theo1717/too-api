@@ -125,8 +125,18 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     }
     await collection_history.insert_one(user_msg)
 
-    # --- Gera resposta com RAG ---
-    answer_text = await rag_answer(req.message)
+    # --- Conta mensagens anteriores do chat ---
+    previous_msgs_count = await collection_history.count_documents({
+        "chat_id": chat_id,
+        "user_email": current_user["email"]
+    })
+
+    # --- Gera resposta com RAG, passando info do chat para saudação inicial ---
+    answer_text = await rag_answer(
+        query=req.message,
+        chat_id=chat_id,
+        user_email=current_user["email"] if previous_msgs_count == 1 else None
+    )
 
     # --- Salva a resposta do bot ---
     bot_msg = {
@@ -140,6 +150,7 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
 
     # --- Retorna resposta e chat_id ---
     return {"answer": answer_text, "chat_id": chat_id}
+
 
 @app.get("/chat-history")
 async def chat_list(current_user=Depends(get_user_from_token)):
