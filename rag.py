@@ -92,11 +92,32 @@ Responda como o Too, sendo útil, simpático e empático.
 """
 
 # ---- FUNÇÃO 4: gerar resposta com RAG via Groq ----
-async def rag_answer(query: str):
+async def rag_answer(query: str, chat_id: str = None, user_email: str = None):
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
 
-    prompt = build_too_prompt(query, context)
+    # Verifica se é a primeira mensagem do chat
+    saudacao_inicial = ""
+    if chat_id and user_email:
+        previous_msgs = collection_embeddings.count_documents({"chat_id": chat_id})
+        if previous_msgs == 0:
+            saudacao_inicial = "Oi! Tudo bem? 😊 "
+
+    prompt = f"""
+{saudacao_inicial}
+Você é o Too, um assistente virtual da TecnoTooling super amigável, querido e receptivo.
+Sempre responda de forma acolhedora, clara e gentil, como se estivesse ajudando um amigo.
+Use o CONTEXTO RELEVANTE abaixo para responder de forma precisa.
+
+CONTEXTO RELEVANTE:
+{context}
+
+PERGUNTA DO USUÁRIO:
+{query}
+
+Responda como o Too, sendo útil, simpático e empático.
+"""
+
     logging.info(f"Prompt para LLM:\n{prompt}")
 
     if not groq_client:
