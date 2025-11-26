@@ -12,7 +12,7 @@ from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 
 # --- RAG Import ---
-from rag import rag_answer  # rag.py atualizado
+from rag import rag_answer  # versão com Cohere embeddings e 384 dimensões
 
 load_dotenv()
 
@@ -21,7 +21,7 @@ app = FastAPI()
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,10 +49,6 @@ oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
-
-class UserUpdate(BaseModel):
-    email: EmailStr | None = None
-    password: str | None = None
 
 class LoginRequest(BaseModel):
     username: EmailStr
@@ -124,18 +120,8 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     }
     await collection_history.insert_one(user_msg)
 
-    # --- Conta mensagens anteriores para saudação ---
-    previous_msgs_count = await collection_history.count_documents({
-        "chat_id": chat_id,
-        "user_email": current_user["email"]
-    })
-
     # --- Gera resposta com RAG ---
-    answer_text = await rag_answer(
-        query=req.message,
-        chat_id=chat_id,
-        user_email=current_user["email"] if previous_msgs_count == 1 else None
-    )
+    answer_text = await rag_answer(req.message, current_user["email"], chat_id)
 
     # --- Salva a resposta do bot ---
     bot_msg = {
@@ -158,7 +144,6 @@ async def chat_list(current_user=Depends(get_user_from_token)):
         {"$sort": {"date": -1}}
     ]
     cursor = collection_history.aggregate(pipeline)
-
     chats = []
     async for chat in cursor:
         chats.append({
@@ -182,37 +167,11 @@ async def new_chat(current_user=Depends(get_user_from_token)):
 
 @app.get("/chat-history/{chat_id}")
 async def get_chat_messages(chat_id: str, current_user=Depends(get_user_from_token)):
-    cursor = collection_history.find(
-        {"chat_id": chat_id, "user_email": current_user["email"]},
-        sort=[("timestamp", 1)]
-    )
+    cursor = collection_history.find({"chat_id": chat_id, "user_email": current_user["email"]}, sort=[("timestamp", 1)])
     msgs = []
     async for m in cursor:
         msgs.append({"sender": m.get("sender"), "text": m.get("text"), "timestamp": m.get("timestamp")})
     return {"chat_id": chat_id, "messages": msgs}
-
-@app.post("/send-message")
-async def send_message(data: dict = Body(...), current_user=Depends(get_user_from_token)):
-    chat_id = data.get("chat_id")
-    text = data.get("text")
-    if not chat_id:
-        raise HTTPException(status_code=400, detail="chat_id ausente")
-    await collection_history.insert_one({
-        "chat_id": chat_id,
-        "user_email": current_user["email"],
-        "sender": "user",
-        "text": text,
-        "timestamp": datetime.utcnow()
-    })
-    answer_text = await rag_answer(query=text, chat_id=chat_id, user_email=current_user["email"])
-    await collection_history.insert_one({
-        "chat_id": chat_id,
-        "user_email": current_user["email"],
-        "sender": "bot",
-        "text": answer_text,
-        "timestamp": datetime.utcnow()
-    })
-    return {"answer": answer_text}
 
 @app.delete("/chat/{chat_id}")
 async def delete_chat(chat_id: str = Path(...), current_user=Depends(get_user_from_token)):
