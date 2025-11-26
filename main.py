@@ -178,15 +178,7 @@ from fastapi import Body
 async def new_chat(current_user=Depends(get_user_from_token)):
     new_id = str(datetime.utcnow().timestamp())
 
-    # salva um registro inicial (vazio)
-    await collection_history.insert_one({
-        "chat_id": new_id,
-        "user_email": current_user["email"],
-        "sender": "system",
-        "text": "Chat criado",
-        "timestamp": datetime.utcnow()
-    })
-
+    # Apenas cria o chat_id e retorna, sem salvar mensagem inicial
     return {"chat_id": new_id}
 
 
@@ -249,8 +241,6 @@ async def send_message(
     })
 
     return {"answer": answer_text}
-
-from fastapi import Path
 
 @app.delete("/chat/{chat_id}")
 async def delete_chat(chat_id: str = Path(...), current_user=Depends(get_user_from_token)):
