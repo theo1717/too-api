@@ -12,7 +12,7 @@ from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 
 # --- RAG Import ---
-from rag import rag_answer  # versão com Cohere embeddings e 384 dimensões
+from rag import rag_answer  # rag.py atualizado (usando Cohere)
 
 load_dotenv()
 
@@ -21,7 +21,7 @@ app = FastAPI()
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,6 +49,10 @@ oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
+
+class UserUpdate(BaseModel):
+    email: EmailStr | None = None
+    password: str | None = None
 
 class LoginRequest(BaseModel):
     username: EmailStr
@@ -120,10 +124,20 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     }
     await collection_history.insert_one(user_msg)
 
-    # --- Gera resposta com RAG ---
-    answer_text = await rag_answer(req.message, current_user["email"], chat_id)
+    # --- Conta mensagens anteriores ---
+    previous_msgs_count = await collection_history.count_documents({
+        "chat_id": chat_id,
+        "user_email": current_user["email"]
+    })
 
-    # --- Salva a resposta do bot ---
+    # --- Gera resposta com RAG (Cohere) ---
+    answer_text = await rag_answer(
+        query=req.message,
+        chat_id=chat_id,
+        user_email=current_user["email"] if previous_msgs_count == 1 else None
+    )
+
+    # --- Salva resposta do bot ---
     bot_msg = {
         "chat_id": chat_id,
         "user_email": current_user["email"],
@@ -167,15 +181,21 @@ async def new_chat(current_user=Depends(get_user_from_token)):
 
 @app.get("/chat-history/{chat_id}")
 async def get_chat_messages(chat_id: str, current_user=Depends(get_user_from_token)):
-    cursor = collection_history.find({"chat_id": chat_id, "user_email": current_user["email"]}, sort=[("timestamp", 1)])
+    cursor = collection_history.find(
+        {"chat_id": chat_id, "user_email": current_user["email"]},
+        sort=[("timestamp", 1)]
+    )
     msgs = []
     async for m in cursor:
         msgs.append({"sender": m.get("sender"), "text": m.get("text"), "timestamp": m.get("timestamp")})
     return {"chat_id": chat_id, "messages": msgs}
 
-@app.delete("/chat/{chat_id}")
+@app.delete("/delete-chat/{chat_id}")
 async def delete_chat(chat_id: str = Path(...), current_user=Depends(get_user_from_token)):
     result = await collection_history.delete_many({"chat_id": chat_id, "user_email": current_user["email"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Chat não encontrado")
     return {"mensagem": f"Chat {chat_id} deletado com sucesso."}
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
