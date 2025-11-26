@@ -114,47 +114,47 @@ async def login(data: LoginRequest):
     token = create_token({"sub": user["email"]})
     return {"access_token": token, "token_type": "bearer"}
 
+# --- CHAT ---
 @app.post("/chat")
 async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
+    # Cria chat_id único se não enviado
     chat_id = req.chat_id or str(datetime.utcnow().timestamp())
 
-    # Salva a mensagem do usuário
+    # Mensagem do usuário
     user_msg = {
-        "chat_id": chat_id,
-        "user_email": current_user["email"],
         "sender": "user",
         "text": req.message,
         "timestamp": datetime.utcnow()
     }
-    await collection_history.insert_one(user_msg)
 
-    # Gera resposta com RAG
+    # Resposta do bot
     answer_text = await rag_answer(req.message)
-
-    # Salva a resposta do bot
     bot_msg = {
-        "chat_id": chat_id,
-        "user_email": current_user["email"],
         "sender": "bot",
         "text": answer_text,
         "timestamp": datetime.utcnow()
     }
-    await collection_history.insert_one(bot_msg)
 
-    # Retorna o chat_id para referência
+    # Salva ou atualiza o chat como um único documento
+    result = await collection_history.update_one(
+        {"chat_id": chat_id, "user_email": current_user["email"]},
+        {"$push": {"messages": {"$each": [user_msg, bot_msg]}}},
+        upsert=True
+    )
+    print(f"Chat atualizado: matched={result.matched_count}, modified={result.modified_count}")
+
     return {"answer": answer_text, "chat_id": chat_id}
 
 @app.get("/chat-history/{chat_id}")
 async def chat_history(chat_id: str, current_user=Depends(get_user_from_token)):
-    history = []
-    cursor = collection_history.find({"chat_id": chat_id, "user_email": current_user["email"]}).sort("timestamp", 1)
-    async for msg in cursor:
-        history.append({
-            "sender": msg["sender"],
-            "text": msg["text"],
-            "timestamp": msg["timestamp"].isoformat()
-        })
-    return {"messages": history}
+    chat_doc = await collection_history.find_one(
+        {"chat_id": chat_id, "user_email": current_user["email"]}
+    )
+    if not chat_doc:
+        return {"messages": []}
+
+    # Retorna o array de mensagens
+    return {"messages": chat_doc.get("messages", [])}
 
 # --- MAIN ---
 if __name__ == "__main__":
