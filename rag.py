@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import logging
 import cohere
 import asyncio
+import groq  # Groq SDK para chat generation
 
 load_dotenv()
 
@@ -17,6 +18,12 @@ co = cohere.Client(COHERE_API_KEY)
 
 EMB_DIM = 384  # dimensão do embedding small
 TOP_K = 3      # quantos trechos retornar
+
+# ---- CONFIGURAÇÕES GROQ ----
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise Exception("Erro: GROQ_API_KEY não encontrada.")
+groq_client = groq.Client(api_key=GROQ_API_KEY)
 
 # ---- MONGO ----
 MONGO_URI = os.getenv("MONGO_URI")
@@ -48,7 +55,9 @@ async def search_similar_docs(query_embedding: np.ndarray, k: int = TOP_K) -> st
             if doc_emb.shape != query_embedding.shape:
                 logging.warning(f"Dimensões diferentes: doc {doc_emb.shape}, query {query_embedding.shape}")
                 continue
-            similarity = np.dot(query_embedding, doc_emb) / (np.linalg.norm(query_embedding) * np.linalg.norm(doc_emb) + 1e-10)
+            similarity = np.dot(query_embedding, doc_emb) / (
+                np.linalg.norm(query_embedding) * np.linalg.norm(doc_emb) + 1e-10
+            )
             results.append((similarity, doc.get("text", "")))
 
         results.sort(key=lambda x: x[0], reverse=True)
@@ -59,17 +68,18 @@ async def search_similar_docs(query_embedding: np.ndarray, k: int = TOP_K) -> st
         logging.error(f"Erro ao buscar documentos similares: {e}")
         return "Não foi possível buscar contexto relevante."
 
-# ---- FUNÇÃO 3: gerar resposta com RAG via Cohere ----
+# ---- FUNÇÃO 3: gerar resposta com RAG via Groq ----
 async def rag_answer(query: str, chat_id: str = None, user_email: str = None) -> str:
     """
-    Parâmetros:
-        query: a pergunta do usuário
-        chat_id: id do chat (não usado na geração, mas necessário para compatibilidade)
-        user_email: email do usuário (não usado na geração, mas necessário para compatibilidade)
+    Gera resposta de chat usando:
+        - Cohere embeddings para buscar contexto
+        - Groq para gerar resposta baseada no contexto
     """
+    # 1️⃣ Buscar contexto
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
 
+    # 2️⃣ Criar prompt
     prompt = f"""
 Você é o assistente virtual da empresa TecnoTooling chamado "Too". 
 Seu objetivo é fornecer respostas objetivas e claras usando o CONTEXTO RELEVANTE abaixo.
@@ -83,16 +93,18 @@ PERGUNTA:
 Responda de forma direta, profissional e concisa, sem incluir informações irrelevantes.
 """
 
-    logging.info(f"Prompt enviado para Cohere:\n{prompt}")
+    logging.info(f"Prompt enviado para Groq:\n{prompt}")
 
+    # 3️⃣ Chamar Groq Chat
     try:
-        response = co.generate(
-            model="xlarge",
-            prompt=prompt,
-            max_tokens=300,
-            temperature=0.3
+        response = groq_client.chat(
+            model="gpt-4.1-mini",  # ou outro modelo disponível
+            messages=[
+                {"role": "system", "content": "Você é um assistente profissional."},
+                {"role": "user", "content": prompt}
+            ]
         )
-        return response.generations[0].text.strip()
+        return response.message.content.strip()
     except Exception as e:
-        logging.error(f"Erro ao gerar resposta Cohere: {e}")
+        logging.error(f"Erro ao gerar resposta Groq: {e}")
         return "Desculpe, não consegui gerar uma resposta no momento."
