@@ -12,7 +12,7 @@ from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 
 # --- RAG Import ---
-from rag import rag_answer  # Cohere embeddings + Groq chat
+from rag import rag_answer  # usa embeddings do Mongo + Groq Chat
 
 load_dotenv()
 
@@ -21,7 +21,7 @@ app = FastAPI()
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,16 +63,16 @@ class ChatRequest(BaseModel):
     message: str
 
 # --- FUNÇÕES AUXILIARES ---
-def hash_password(password: str) -> str:
+def hash_password(password):
     return pwd_context.hash(password[:72])
 
-def verify_password(password: str, hashed: str) -> bool:
+def verify_password(password, hashed):
     return pwd_context.verify(password[:72], hashed)
 
-def create_token(data: dict) -> str:
-    data_copy = data.copy()
-    data_copy["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    return jwt.encode(data_copy, SECRET_KEY, algorithm=ALGORITHM)
+def create_token(data: dict):
+    data = data.copy()
+    data["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
 
 async def get_user_from_token(token: str = Depends(oauth2)):
     try:
@@ -94,10 +94,12 @@ async def root():
 
 @app.post("/register")
 async def register_user(user: UserRegister):
-    if await collection_users.find_one({"email": user.email}):
+    existing = await collection_users.find_one({"email": user.email})
+    if existing:
         raise HTTPException(status_code=400, detail="Email já registrado")
     hashed = hash_password(user.password)
-    result = await collection_users.insert_one({"email": user.email, "password": hashed})
+    new_user = {"email": user.email, "password": hashed}
+    result = await collection_users.insert_one(new_user)
     return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
 
 @app.post("/login")
@@ -112,26 +114,38 @@ async def login(data: LoginRequest):
 async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     chat_id = req.chat_id or str(datetime.utcnow().timestamp())
 
-    # Salva mensagem do usuário
-    await collection_history.insert_one({
+    # --- Salva a mensagem do usuário ---
+    user_msg = {
         "chat_id": chat_id,
         "user_email": current_user["email"],
         "sender": "user",
         "text": req.message,
         "timestamp": datetime.utcnow()
+    }
+    await collection_history.insert_one(user_msg)
+
+    # --- Conta mensagens anteriores ---
+    previous_msgs_count = await collection_history.count_documents({
+        "chat_id": chat_id,
+        "user_email": current_user["email"]
     })
 
-    # Gera resposta com RAG
-    answer_text = await rag_answer(req.message)
+    # --- Gera resposta com RAG (Mongo embeddings + Groq Chat) ---
+    answer_text = await rag_answer(
+        query=req.message,
+        chat_id=chat_id,
+        user_email=current_user["email"] if previous_msgs_count == 1 else None
+    )
 
-    # Salva resposta do bot
-    await collection_history.insert_one({
+    # --- Salva resposta do bot ---
+    bot_msg = {
         "chat_id": chat_id,
         "user_email": current_user["email"],
         "sender": "bot",
         "text": answer_text,
         "timestamp": datetime.utcnow()
-    })
+    }
+    await collection_history.insert_one(bot_msg)
 
     return {"answer": answer_text, "chat_id": chat_id}
 
