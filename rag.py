@@ -75,23 +75,28 @@ async def search_similar_docs(query_embedding, k=3):
         logging.error(f"Erro ao buscar documentos similares: {e}")
         return "Não foi possível buscar contexto relevante."
 
-# ---- FUNÇÃO 3: gerar resposta com RAG via Groq ----
-async def rag_answer(query: str):
-    query_emb = await get_embedding(query)
-    context = await search_similar_docs(query_emb)
-
-    prompt = f"""
-Você é o assistente virtual da empresa TecnoTooling chamado "Too". 
-Seu objetivo é fornecer respostas objetivas e claras usando o CONTEXTO RELEVANTE abaixo.
+# ---- FUNÇÃO 3: construir prompt amigável ----
+def build_too_prompt(user_message: str, context: str) -> str:
+    return f"""
+Você é o Too, um assistente virtual da TecnoTooling super amigável, querido e receptivo.
+Sempre responda de forma acolhedora, clara e gentil, como se estivesse ajudando um amigo.
+Use o CONTEXTO RELEVANTE abaixo para responder de forma precisa.
 
 CONTEXTO RELEVANTE:
 {context}
 
-PERGUNTA:
-{query}
+PERGUNTA DO USUÁRIO:
+{user_message}
 
-Responda de forma direta, profissional e concisa, sem incluir informações irrelevantes
+Responda como o Too, sendo útil, simpático e empático.
 """
+
+# ---- FUNÇÃO 4: gerar resposta com RAG via Groq ----
+async def rag_answer(query: str):
+    query_emb = await get_embedding(query)
+    context = await search_similar_docs(query_emb)
+
+    prompt = build_too_prompt(query, context)
     logging.info(f"Prompt para LLM:\n{prompt}")
 
     if not groq_client:
@@ -102,7 +107,7 @@ Responda de forma direta, profissional e concisa, sem incluir informações irre
         response = groq_client.chat.completions.create(
             model="groq/compound-mini",
             messages=[
-                {"role": "system", "content": "Você é um assistente útil."},
+                {"role": "system", "content": "Você é um assistente útil e amigável."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=300
