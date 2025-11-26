@@ -21,11 +21,7 @@ app = FastAPI()
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://toofrontend.vercel.app",
-        "http://localhost:8081",
-        "http://localhost:3000"
-    ],
+    allow_origins=["*"],   # <---- CORREÇÃO QUE O RENDER ACEITA
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
