@@ -1,59 +1,60 @@
+# rag.py
 import os
 import numpy as np
+from groq import Groq
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import httpx
 import logging
-from openai import OpenAI  # import para embeddings
+import requests
 
 load_dotenv()
 
 # ---- CONFIG ----
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Para embeddings
+HF_TOKEN = os.getenv("HF_TOKEN")  # Token Hugging Face
+HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 if not GROQ_API_KEY:
     raise Exception("Erro: GROQ_API_KEY não encontrada.")
 if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada.")
-if not OPENAI_API_KEY:
-    raise Exception("Erro: OPENAI_API_KEY não encontrada.")
+if not HF_TOKEN:
+    raise Exception("Erro: HF_TOKEN não encontrada.")
 
 # ---- CLIENTE GROQ ----
 try:
     http_client = httpx.Client()
-    import groq
-    groq_client = groq.Groq(api_key=GROQ_API_KEY, http_client=http_client)
+    groq_client = Groq(api_key=GROQ_API_KEY, http_client=http_client)
 except Exception as e:
     logging.error(f"Falha ao inicializar Groq: {e}")
     groq_client = None
-
-# ---- CLIENTE OPENAI PARA EMBEDDINGS ----
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---- MONGO ----
 client = AsyncIOMotorClient(MONGO_URI)
 db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
-# Modelos
-MODEL_EMBED = "text-embedding-3-small"  # embeddings OpenAI
-MODEL_LLM = "groq/compound-mini"        # chat Groq
-
-# -------- FUNÇÃO 1: gerar embedding --------
-async def get_embedding(text: str):
+# ---- FUNÇÃO 1: gerar embedding via Hugging Face ----
+def get_embedding(text: str) -> np.ndarray:
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL}"
+    payload = {"inputs": text}
+    
     try:
-        response = openai_client.embeddings.create(
-            model=MODEL_EMBED,
-            input=text
-        )
-        return np.array(response.data[0].embedding)
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        emb = np.array(response.json())
+        # Média dos vetores de tokens
+        if len(emb.shape) > 1:
+            emb = emb.mean(axis=0)
+        return emb
     except Exception as e:
-        logging.error(f"Erro ao gerar embedding: {e}")
-        return np.zeros(1536)  # tamanho do embedding text-embedding-3-small
+        logging.error(f"Erro ao gerar embedding HF: {e}")
+        return np.zeros(384)  # tamanho do all-MiniLM-L6-v2
 
-# -------- FUNÇÃO 2: buscar top-k documentos similares --------
+# ---- FUNÇÃO 2: buscar top-k documentos similares ----
 async def search_similar_docs(query_embedding, k=3):
     results = []
     try:
@@ -71,9 +72,9 @@ async def search_similar_docs(query_embedding, k=3):
         logging.error(f"Erro ao buscar documentos similares: {e}")
         return "Não foi possível buscar contexto relevante."
 
-# -------- FUNÇÃO 3: gerar resposta com RAG --------
+# ---- FUNÇÃO 3: gerar resposta com RAG via Groq ----
 async def rag_answer(query: str):
-    query_emb = await get_embedding(query)
+    query_emb = get_embedding(query)
     context = await search_similar_docs(query_emb)
 
     prompt = f"""
@@ -96,7 +97,7 @@ Responda de forma direta, profissional e concisa, sem incluir informações irre
 
     try:
         response = groq_client.chat.completions.create(
-            model=MODEL_LLM,
+            model="groq/compound-mini",
             messages=[
                 {"role": "system", "content": "Você é um assistente útil."},
                 {"role": "user", "content": prompt}
