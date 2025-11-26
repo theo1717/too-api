@@ -1,7 +1,7 @@
 # main.py
 import os
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Body, Path
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -10,10 +10,9 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
-from pymongo import MongoClient
 
 # --- RAG Import ---
-from rag import rag_answer, get_embedding  # usamos o HF embeddings aqui
+from rag import rag_answer  # rag.py atualizado
 
 load_dotenv()
 
@@ -125,8 +124,18 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     }
     await collection_history.insert_one(user_msg)
 
+    # --- Conta mensagens anteriores para saudação ---
+    previous_msgs_count = await collection_history.count_documents({
+        "chat_id": chat_id,
+        "user_email": current_user["email"]
+    })
+
     # --- Gera resposta com RAG ---
-    answer_text = await rag_answer(req.message)
+    answer_text = await rag_answer(
+        query=req.message,
+        chat_id=chat_id,
+        user_email=current_user["email"] if previous_msgs_count == 1 else None
+    )
 
     # --- Salva a resposta do bot ---
     bot_msg = {
@@ -138,25 +147,16 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     }
     await collection_history.insert_one(bot_msg)
 
-    # --- Retorna resposta e chat_id ---
     return {"answer": answer_text, "chat_id": chat_id}
 
 @app.get("/chat-history")
 async def chat_list(current_user=Depends(get_user_from_token)):
-    # Agrupa mensagens por chat_id
     pipeline = [
         {"$match": {"user_email": current_user["email"]}},
         {"$sort": {"timestamp": 1}},
-        {
-            "$group": {
-                "_id": "$chat_id",
-                "first_message": {"$first": "$text"},
-                "date": {"$first": "$timestamp"}
-            }
-        },
+        {"$group": {"_id": "$chat_id", "first_message": {"$first": "$text"}, "date": {"$first": "$timestamp"}}},
         {"$sort": {"date": -1}}
     ]
-
     cursor = collection_history.aggregate(pipeline)
 
     chats = []
@@ -166,19 +166,11 @@ async def chat_list(current_user=Depends(get_user_from_token)):
             "title": chat["first_message"][:40] + "...",
             "date": chat["date"].strftime("%Y-%m-%d"),
         })
-
     return {"chats": chats}
 
-from fastapi import Body
-
-# ------------------------------
-# 1) CRIAR NOVO CHAT
-# ------------------------------
 @app.post("/new-chat")
 async def new_chat(current_user=Depends(get_user_from_token)):
     new_id = str(datetime.utcnow().timestamp())
-
-    # salva um registro inicial (vazio)
     await collection_history.insert_one({
         "chat_id": new_id,
         "user_email": current_user["email"],
@@ -186,48 +178,25 @@ async def new_chat(current_user=Depends(get_user_from_token)):
         "text": "Chat criado",
         "timestamp": datetime.utcnow()
     })
-
     return {"chat_id": new_id}
 
-
-# ------------------------------
-# 2) PEGAR MENSAGENS DE UM CHAT ESPECÍFICO
-# ------------------------------
 @app.get("/chat-history/{chat_id}")
 async def get_chat_messages(chat_id: str, current_user=Depends(get_user_from_token)):
-
     cursor = collection_history.find(
         {"chat_id": chat_id, "user_email": current_user["email"]},
         sort=[("timestamp", 1)]
     )
-
     msgs = []
     async for m in cursor:
-        msgs.append({
-            "sender": m.get("sender"),
-            "text": m.get("text"),
-            "timestamp": m.get("timestamp")
-        })
-
+        msgs.append({"sender": m.get("sender"), "text": m.get("text"), "timestamp": m.get("timestamp")})
     return {"chat_id": chat_id, "messages": msgs}
 
-
-# ------------------------------
-# 3) ENVIAR MENSAGEM (CASO SEU FRONT PRECISE)
-# MAS O SEU FRONT JÁ USA /chat, ENTÃO É OPCIONAL
-# ------------------------------
 @app.post("/send-message")
-async def send_message(
-    data: dict = Body(...),
-    current_user=Depends(get_user_from_token)
-):
+async def send_message(data: dict = Body(...), current_user=Depends(get_user_from_token)):
     chat_id = data.get("chat_id")
     text = data.get("text")
-
     if not chat_id:
         raise HTTPException(status_code=400, detail="chat_id ausente")
-
-    # salva msg do usuário
     await collection_history.insert_one({
         "chat_id": chat_id,
         "user_email": current_user["email"],
@@ -235,11 +204,7 @@ async def send_message(
         "text": text,
         "timestamp": datetime.utcnow()
     })
-
-    # gera resposta via RAG
-    answer_text = await rag_answer(text)
-
-    # salva msg do bot
+    answer_text = await rag_answer(query=text, chat_id=chat_id, user_email=current_user["email"])
     await collection_history.insert_one({
         "chat_id": chat_id,
         "user_email": current_user["email"],
@@ -247,10 +212,7 @@ async def send_message(
         "text": answer_text,
         "timestamp": datetime.utcnow()
     })
-
     return {"answer": answer_text}
-
-from fastapi import Path
 
 @app.delete("/chat/{chat_id}")
 async def delete_chat(chat_id: str = Path(...), current_user=Depends(get_user_from_token)):

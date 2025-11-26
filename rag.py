@@ -14,7 +14,8 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 HF_TOKEN = os.getenv("HF_TOKEN")  # Token Hugging Face
-HF_MODEL = "BAAI/bge-m3-small"   # Modelo Hugging Face embeddings
+HF_MODEL = "BAAI/bge-m3-small"   # Modelo HF embeddings
+EMB_DIM = 384  # dimensão correta do BGE-M3-Small
 
 if not GROQ_API_KEY:
     raise Exception("Erro: GROQ_API_KEY não encontrada.")
@@ -47,12 +48,12 @@ async def get_embedding(text: str) -> np.ndarray:
             response = await session.post(url, headers=headers, json=payload)
             response.raise_for_status()
             emb = np.array(response.json())
-            if len(emb.shape) > 1:  # média dos tokens
-                emb = emb.mean(axis=0)
+            if len(emb.shape) > 1:
+                emb = emb.mean(axis=0)  # média dos tokens
             return emb
         except Exception as e:
             logging.error(f"Erro ao gerar embedding HF: {e}")
-            return np.zeros(1024)  # dimensão do BGE-M3-Small
+            return np.zeros(EMB_DIM)
 
 # ---- FUNÇÃO 2: buscar top-k documentos similares ----
 async def search_similar_docs(query_embedding, k=3):
@@ -60,11 +61,10 @@ async def search_similar_docs(query_embedding, k=3):
     try:
         async for doc in collection_embeddings.find():
             doc_emb = np.array(doc["embedding"])
-            q_emb = np.array(query_embedding)
-            if doc_emb.shape != q_emb.shape:
-                logging.warning(f"Dimensões diferentes: doc {doc_emb.shape}, query {q_emb.shape}")
+            if doc_emb.shape != query_embedding.shape:
+                logging.warning(f"Dimensões diferentes: doc {doc_emb.shape}, query {query_embedding.shape}")
                 continue
-            similarity = np.dot(q_emb, doc_emb) / (np.linalg.norm(q_emb) * np.linalg.norm(doc_emb) + 1e-10)
+            similarity = np.dot(query_embedding, doc_emb) / (np.linalg.norm(query_embedding) * np.linalg.norm(doc_emb) + 1e-10)
             results.append((similarity, doc["text"]))
 
         results.sort(key=lambda x: x[0], reverse=True)
@@ -76,9 +76,12 @@ async def search_similar_docs(query_embedding, k=3):
         return "Não foi possível buscar contexto relevante."
 
 # ---- FUNÇÃO 3: gerar resposta com RAG via Groq ----
-async def rag_answer(query: str):
+async def rag_answer(query: str, chat_id: str | None = None, user_email: str | None = None) -> str:
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
+
+    # Saudação ou contexto adicional se for primeira mensagem
+    greeting = f"Usuário: {user_email}\n" if user_email else ""
 
     prompt = f"""
 Você é o assistente virtual da empresa TecnoTooling chamado "Too". 
@@ -87,10 +90,10 @@ Seu objetivo é fornecer respostas objetivas e claras usando o CONTEXTO RELEVANT
 CONTEXTO RELEVANTE:
 {context}
 
-PERGUNTA:
+{greeting}PERGUNTA:
 {query}
 
-Responda de forma direta, profissional e concisa, sem incluir informações irrelevantes
+Responda de forma direta, profissional e concisa, sem incluir informações irrelevantes.
 """
     logging.info(f"Prompt para LLM:\n{prompt}")
 
@@ -114,7 +117,17 @@ Responda de forma direta, profissional e concisa, sem incluir informações irre
             return " ".join([m.content for m in message_obj])
         else:
             return str(message_obj)
-
     except Exception as e:
-        logging.error(f"Erro ao gerar resposta: {e}")
+        logging.error(f"Erro ao gerar resposta LLM: {e}")
         return "Desculpe, ocorreu um erro ao gerar a resposta."
+
+# ---- FUNÇÃO EXTRA: atualizar embeddings antigos ----
+async def update_all_embeddings():
+    async for doc in collection_embeddings.find():
+        text = doc["text"]
+        emb = await get_embedding(text)
+        await collection_embeddings.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {"embedding": emb.tolist()}}
+        )
+    logging.info("Todos os embeddings atualizados para dimensão correta.")
