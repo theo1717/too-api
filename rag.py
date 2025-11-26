@@ -1,6 +1,7 @@
 # rag.py
 import os
 import numpy as np
+from groq import Groq
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import httpx
@@ -10,14 +11,25 @@ import asyncio
 load_dotenv()
 
 # ---- CONFIG ----
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
-HF_TOKEN = os.getenv("HF_TOKEN")  # Hugging Face API token
-HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+HF_TOKEN = os.getenv("HF_TOKEN")  # Token Hugging Face
+HF_MODEL = "BAAI/bge-m3-small"   # Modelo Hugging Face embeddings
 
+if not GROQ_API_KEY:
+    raise Exception("Erro: GROQ_API_KEY não encontrada.")
 if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada.")
 if not HF_TOKEN:
     raise Exception("Erro: HF_TOKEN não encontrada.")
+
+# ---- CLIENTE GROQ ----
+try:
+    http_client = httpx.Client()
+    groq_client = Groq(api_key=GROQ_API_KEY, http_client=http_client)
+except Exception as e:
+    logging.error(f"Falha ao inicializar Groq: {e}")
+    groq_client = None
 
 # ---- MONGO ----
 client = AsyncIOMotorClient(MONGO_URI)
@@ -35,16 +47,15 @@ async def get_embedding(text: str) -> np.ndarray:
             response = await session.post(url, headers=headers, json=payload)
             response.raise_for_status()
             emb = np.array(response.json())
-            # Reduz embeddings de tokens para um vetor único
-            if len(emb.shape) > 1:
+            if len(emb.shape) > 1:  # média dos tokens
                 emb = emb.mean(axis=0)
-            return emb  # dimensão 384
+            return emb
         except Exception as e:
             logging.error(f"Erro ao gerar embedding HF: {e}")
-            return np.zeros(384)
+            return np.zeros(1024)  # dimensão do BGE-M3-Small
 
 # ---- FUNÇÃO 2: buscar top-k documentos similares ----
-async def search_similar_docs(query_embedding, k=3, min_similarity=0.6):
+async def search_similar_docs(query_embedding, k=3):
     results = []
     try:
         async for doc in collection_embeddings.find():
@@ -54,57 +65,56 @@ async def search_similar_docs(query_embedding, k=3, min_similarity=0.6):
                 logging.warning(f"Dimensões diferentes: doc {doc_emb.shape}, query {q_emb.shape}")
                 continue
             similarity = np.dot(q_emb, doc_emb) / (np.linalg.norm(q_emb) * np.linalg.norm(doc_emb) + 1e-10)
-            if similarity >= min_similarity:
-                results.append((similarity, doc["text"][:500]))  # limita 500 chars
+            results.append((similarity, doc["text"]))
+
         results.sort(key=lambda x: x[0], reverse=True)
         top_texts = [r[1] for r in results[:k]]
+        logging.info(f"Top {k} documentos mais similares: {[r[0] for r in results[:k]]}")
         return "\n".join(top_texts)
     except Exception as e:
         logging.error(f"Erro ao buscar documentos similares: {e}")
-        return ""
+        return "Não foi possível buscar contexto relevante."
 
-# ---- FUNÇÃO 3: construir prompt objetivo ----
-def build_too_prompt(user_message: str, context: str) -> str:
-    return f"""
-Você é o Too, assistente virtual da TecnoTooling.
-Seja objetivo, conciso e útil, usando apenas o CONTEXTO RELEVANTE abaixo.
-
-CONTEXTO RELEVANTE:
-{context}
-
-PERGUNTA DO USUÁRIO:
-{user_message}
-
-Responda de forma direta e clara, sem cumprimentos desnecessários.
-"""
-
-# ---- FUNÇÃO 4: gerar resposta com RAG via Hugging Face API ----
+# ---- FUNÇÃO 3: gerar resposta com RAG via Groq ----
 async def rag_answer(query: str):
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
 
-    prompt = build_too_prompt(query, context)
-    logging.info(f"Prompt gerado:\n{prompt}")
+    prompt = f"""
+Você é o assistente virtual da empresa TecnoTooling chamado "Too". 
+Seu objetivo é fornecer respostas objetivas e claras usando o CONTEXTO RELEVANTE abaixo.
 
-    # ---- Chamando LLM da Hugging Face (ou outro endpoint) ----
-    HF_CHAT_MODEL = "gpt2"  # substitua por outro modelo se tiver disponível
+CONTEXTO RELEVANTE:
+{context}
 
-    url = f"https://api-inference.huggingface.co/models/{HF_CHAT_MODEL}"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 150}}
+PERGUNTA:
+{query}
 
-    async with httpx.AsyncClient(timeout=60) as session:
-        try:
-            response = await session.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            output = response.json()
-            # Hugging Face retorna lista de strings ou dicionário dependendo do modelo
-            if isinstance(output, list) and "generated_text" in output[0]:
-                return output[0]["generated_text"]
-            elif isinstance(output, dict) and "generated_text" in output:
-                return output["generated_text"]
-            else:
-                return str(output)
-        except Exception as e:
-            logging.error(f"Erro ao gerar resposta LLM: {e}")
-            return "Desculpe, não consegui gerar a resposta."
+Responda de forma direta, profissional e concisa, sem incluir informações irrelevantes
+"""
+    logging.info(f"Prompt para LLM:\n{prompt}")
+
+    if not groq_client:
+        logging.warning("Groq client não disponível, retornando fallback")
+        return "Desculpe, não consigo gerar resposta no momento."
+
+    try:
+        response = groq_client.chat.completions.create(
+            model="groq/compound-mini",
+            messages=[
+                {"role": "system", "content": "Você é um assistente útil."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=300
+        )
+        message_obj = response.choices[0].message
+        if hasattr(message_obj, "content"):
+            return message_obj.content
+        elif isinstance(message_obj, list):
+            return " ".join([m.content for m in message_obj])
+        else:
+            return str(message_obj)
+
+    except Exception as e:
+        logging.error(f"Erro ao gerar resposta: {e}")
+        return "Desculpe, ocorreu um erro ao gerar a resposta."
