@@ -1,59 +1,51 @@
 # rag.py
 import os
 import numpy as np
-from groq import Groq
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
-import httpx
 import logging
 import asyncio
+from openai import OpenAI
 
 load_dotenv()
 
 # ---- CONFIG ----
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
-HF_TOKEN = os.getenv("HF_TOKEN")  # Token Hugging Face
-HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # embedding de 384
-MB_DIM = 384  # dimensão correta do BGE-M3-Small
 
-if not GROQ_API_KEY:
-    raise Exception("Erro: GROQ_API_KEY não encontrada.")
+if not OPENAI_API_KEY:
+    raise Exception("Erro: OPENAI_API_KEY não encontrada.")
 if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada.")
-if not HF_TOKEN:
-    raise Exception("Erro: HF_TOKEN não encontrada.")
 
-# ---- CLIENTE GROQ ----
-try:
-    http_client = httpx.Client()
-    groq_client = Groq(api_key=GROQ_API_KEY, http_client=http_client)
-except Exception as e:
-    logging.error(f"Falha ao inicializar Groq: {e}")
-    groq_client = None
+# ---- CLIENTE OPENAI ----
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+EMB_DIM = 384  # dimensão do embedding que você quer usar
 
 # ---- MONGO ----
 client = AsyncIOMotorClient(MONGO_URI)
 db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
-# ---- FUNÇÃO 1: gerar embedding via Hugging Face (async) ----
+# ---- FUNÇÃO 1: gerar embedding via OpenAI ----
 async def get_embedding(text: str) -> np.ndarray:
-    url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL}"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    payload = {"inputs": text}
-
-    async with httpx.AsyncClient(timeout=60) as session:
-        try:
-            response = await session.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            emb = np.array(response.json())
-            if len(emb.shape) > 1:
-                emb = emb.mean(axis=0)  # média dos tokens
-            return emb
-        except Exception as e:
-            logging.error(f"Erro ao gerar embedding HF: {e}")
-            return np.zeros(EMB_DIM)
+    try:
+        resp = openai_client.embeddings.create(
+            model="text-embedding-3-small",
+            input=text
+        )
+        emb = np.array(resp.data[0].embedding)
+        if emb.shape[0] != EMB_DIM:
+            logging.warning(f"Embedding retornado tem dimensão {emb.shape[0]}, esperada {EMB_DIM}")
+            # Ajusta para 384 preenchendo com zeros ou truncando
+            if emb.shape[0] > EMB_DIM:
+                emb = emb[:EMB_DIM]
+            else:
+                emb = np.pad(emb, (0, EMB_DIM - emb.shape[0]))
+        return emb
+    except Exception as e:
+        logging.error(f"Erro ao gerar embedding OpenAI: {e}")
+        return np.zeros(EMB_DIM)
 
 # ---- FUNÇÃO 2: buscar top-k documentos similares ----
 async def search_similar_docs(query_embedding, k=3):
@@ -75,13 +67,10 @@ async def search_similar_docs(query_embedding, k=3):
         logging.error(f"Erro ao buscar documentos similares: {e}")
         return "Não foi possível buscar contexto relevante."
 
-# ---- FUNÇÃO 3: gerar resposta com RAG via Groq ----
-async def rag_answer(query: str, chat_id: str | None = None, user_email: str | None = None) -> str:
+# ---- FUNÇÃO 3: gerar resposta com RAG usando OpenAI Chat ----
+async def rag_answer(query: str):
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
-
-    # Saudação ou contexto adicional se for primeira mensagem
-    greeting = f"Usuário: {user_email}\n" if user_email else ""
 
     prompt = f"""
 Você é o assistente virtual da empresa TecnoTooling chamado "Too". 
@@ -90,44 +79,23 @@ Seu objetivo é fornecer respostas objetivas e claras usando o CONTEXTO RELEVANT
 CONTEXTO RELEVANTE:
 {context}
 
-{greeting}PERGUNTA:
+PERGUNTA:
 {query}
 
 Responda de forma direta, profissional e concisa, sem incluir informações irrelevantes.
 """
-    logging.info(f"Prompt para LLM:\n{prompt}")
-
-    if not groq_client:
-        logging.warning("Groq client não disponível, retornando fallback")
-        return "Desculpe, não consigo gerar resposta no momento."
+    logging.info(f"Prompt para OpenAI Chat:\n{prompt}")
 
     try:
-        response = groq_client.chat.completions.create(
-            model="groq/compound-mini",
+        resp = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "Você é um assistente útil."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=300
         )
-        message_obj = response.choices[0].message
-        if hasattr(message_obj, "content"):
-            return message_obj.content
-        elif isinstance(message_obj, list):
-            return " ".join([m.content for m in message_obj])
-        else:
-            return str(message_obj)
+        return resp.choices[0].message.content
     except Exception as e:
-        logging.error(f"Erro ao gerar resposta LLM: {e}")
+        logging.error(f"Erro ao gerar resposta OpenAI: {e}")
         return "Desculpe, ocorreu um erro ao gerar a resposta."
-
-# ---- FUNÇÃO EXTRA: atualizar embeddings antigos ----
-async def update_all_embeddings():
-    async for doc in collection_embeddings.find():
-        text = doc["text"]
-        emb = await get_embedding(text)
-        await collection_embeddings.update_one(
-            {"_id": doc["_id"]},
-            {"$set": {"embedding": emb.tolist()}}
-        )
-    logging.info("Todos os embeddings atualizados para dimensão correta.")
