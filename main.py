@@ -144,23 +144,31 @@ async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
     # --- Retorna resposta e chat_id ---
     return {"answer": answer_text, "chat_id": chat_id}
 
-@app.get("/chat-history/{chat_id}")
-async def chat_history(chat_id: str, current_user=Depends(get_user_from_token)):
-    history = []
-    cursor = collection_history.find({"chat_id": chat_id, "user_email": current_user["email"]}).sort("timestamp", 1)
-    async for msg in cursor:
-        history.append({
-            "sender": msg["sender"],
-            "text": msg["text"],
-            "timestamp": msg["timestamp"].isoformat()
-        })
-    return {"messages": history}
+@app.get("/chat-history")
+async def chat_list(current_user=Depends(get_user_from_token)):
+    # Agrupa mensagens por chat_id
+    pipeline = [
+        {"$match": {"user_email": current_user["email"]}},
+        {"$sort": {"timestamp": 1}},
+        {
+            "$group": {
+                "_id": "$chat_id",
+                "first_message": {"$first": "$text"},
+                "date": {"$first": "$timestamp"}
+            }
+        },
+        {"$sort": {"date": -1}}
+    ]
 
-# --- MAIN ---
-if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+    cursor = collection_history.aggregate(pipeline)
+
+    chats = []
+    async for chat in cursor:
+        chats.append({
+            "id": chat["_id"],
+            "title": chat["first_message"][:40] + "...",
+            "date": chat["date"].strftime("%Y-%m-%d"),
+        })
+
+    return {"chats": chats}
+
