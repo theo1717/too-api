@@ -23,6 +23,8 @@ TOP_K = 3      # quantos trechos retornar
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise Exception("Erro: GROQ_API_KEY não encontrada.")
+
+# Inicialização compatível com Groq 0.11.0
 groq_client = groq.Client(api_key=GROQ_API_KEY)
 
 # ---- MONGO ----
@@ -95,10 +97,10 @@ Responda de forma direta, profissional e concisa, sem incluir informações irre
 
     logging.info(f"Prompt enviado para Groq:\n{prompt}")
 
-    # 3️⃣ Chamar Groq Chat
+    # 3️⃣ Chamar Groq Chat (compatível com 0.11.0)
     try:
         response = groq_client.chat(
-            model="gpt-4.1-mini",  # ou outro modelo disponível
+            model="gpt-4.1-mini",  # modelo escolhido
             messages=[
                 {"role": "system", "content": "Você é um assistente profissional."},
                 {"role": "user", "content": prompt}
