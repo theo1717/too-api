@@ -14,8 +14,8 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 HF_TOKEN = os.getenv("HF_TOKEN")  # Token Hugging Face
-HF_MODEL = "BAAI/bge-m3-small"   # Modelo HF embeddings
-EMB_DIM = 384  # dimensão correta do BGE-M3-Small
+HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # embedding de 384
+MB_DIM = 384  # dimensão correta do BGE-M3-Small
 
 if not GROQ_API_KEY:
     raise Exception("Erro: GROQ_API_KEY não encontrada.")
