@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
+from pymongo import MongoClient
 
 # --- RAG Import ---
 from rag import rag_answer, get_embedding  # usamos o HF embeddings aqui
@@ -168,3 +169,83 @@ async def chat_list(current_user=Depends(get_user_from_token)):
 
     return {"chats": chats}
 
+from fastapi import Body
+
+# ------------------------------
+# 1) CRIAR NOVO CHAT
+# ------------------------------
+@app.post("/new-chat")
+async def new_chat(current_user=Depends(get_user_from_token)):
+    new_id = str(datetime.utcnow().timestamp())
+
+    # salva um registro inicial (vazio)
+    await collection_history.insert_one({
+        "chat_id": new_id,
+        "user_email": current_user["email"],
+        "sender": "system",
+        "text": "Chat criado",
+        "timestamp": datetime.utcnow()
+    })
+
+    return {"chat_id": new_id}
+
+
+# ------------------------------
+# 2) PEGAR MENSAGENS DE UM CHAT ESPECÍFICO
+# ------------------------------
+@app.get("/chat-history/{chat_id}")
+async def get_chat_messages(chat_id: str, current_user=Depends(get_user_from_token)):
+
+    cursor = collection_history.find(
+        {"chat_id": chat_id, "user_email": current_user["email"]},
+        sort=[("timestamp", 1)]
+    )
+
+    msgs = []
+    async for m in cursor:
+        msgs.append({
+            "sender": m.get("sender"),
+            "text": m.get("text"),
+            "timestamp": m.get("timestamp")
+        })
+
+    return {"chat_id": chat_id, "messages": msgs}
+
+
+# ------------------------------
+# 3) ENVIAR MENSAGEM (CASO SEU FRONT PRECISE)
+# MAS O SEU FRONT JÁ USA /chat, ENTÃO É OPCIONAL
+# ------------------------------
+@app.post("/send-message")
+async def send_message(
+    data: dict = Body(...),
+    current_user=Depends(get_user_from_token)
+):
+    chat_id = data.get("chat_id")
+    text = data.get("text")
+
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="chat_id ausente")
+
+    # salva msg do usuário
+    await collection_history.insert_one({
+        "chat_id": chat_id,
+        "user_email": current_user["email"],
+        "sender": "user",
+        "text": text,
+        "timestamp": datetime.utcnow()
+    })
+
+    # gera resposta via RAG
+    answer_text = await rag_answer(text)
+
+    # salva msg do bot
+    await collection_history.insert_one({
+        "chat_id": chat_id,
+        "user_email": current_user["email"],
+        "sender": "bot",
+        "text": answer_text,
+        "timestamp": datetime.utcnow()
+    })
+
+    return {"answer": answer_text}
