@@ -22,7 +22,7 @@ app = FastAPI()
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # <---- CORREÇÃO QUE O RENDER ACEITA
+    allow_origins=["http://localhost:8081", "https://too-backendapi.onrender.com"],  # adicione os domínios que acessam o backend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
