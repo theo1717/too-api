@@ -60,7 +60,13 @@ async def search_similar_docs(query_embedding: np.ndarray, k: int = TOP_K) -> st
         return "Não foi possível buscar contexto relevante."
 
 # ---- FUNÇÃO 3: gerar resposta com RAG via Cohere ----
-async def rag_answer(query: str) -> str:
+async def rag_answer(query: str, chat_id: str = None, user_email: str = None) -> str:
+    """
+    Parâmetros:
+        query: a pergunta do usuário
+        chat_id: id do chat (não usado na geração, mas necessário para compatibilidade)
+        user_email: email do usuário (não usado na geração, mas necessário para compatibilidade)
+    """
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
 

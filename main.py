@@ -12,7 +12,7 @@ from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 
 # --- RAG Import ---
-from rag import rag_answer  # rag.py atualizado (usando Cohere)
+from rag import rag_answer  # rag.py atualizado (Cohere)
 
 load_dotenv()
 
