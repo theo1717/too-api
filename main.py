@@ -22,7 +22,7 @@ app = FastAPI()
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8081", "https://too-backendapi.onrender.com"],  # adicione os domínios que acessam o backend
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -249,3 +249,12 @@ async def send_message(
     })
 
     return {"answer": answer_text}
+
+from fastapi import Path
+
+@app.delete("/chat/{chat_id}")
+async def delete_chat(chat_id: str = Path(...), current_user=Depends(get_user_from_token)):
+    result = await collection_history.delete_many({"chat_id": chat_id, "user_email": current_user["email"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Chat não encontrado")
+    return {"mensagem": f"Chat {chat_id} deletado com sucesso."}
