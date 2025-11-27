@@ -1,57 +1,45 @@
 # rag.py
 import os
 import numpy as np
-from groq import Groq
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
-import httpx
 import logging
+import cohere
 
 load_dotenv()
 
-# ---- CONFIG ----
+# ---- CONFIGURAÇÕES ----
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 
 if not GROQ_API_KEY:
     raise Exception("Erro: GROQ_API_KEY não encontrada.")
+if not COHERE_API_KEY:
+    raise Exception("Erro: COHERE_API_KEY não encontrada.")
 if not MONGO_URI:
     raise Exception("Erro: MONGO_URI não encontrada.")
 
-# ---- CLIENTE GROQ ----
-try:
-    http_client = httpx.Client()
-    groq_client = Groq(api_key=GROQ_API_KEY, http_client=http_client)
-except Exception as e:
-    logging.error(f"Falha ao inicializar Groq: {e}")
-    groq_client = None
+# ---- CLIENTES ----
+co = cohere.Client(COHERE_API_KEY)  # Embeddings Cohere
 
 # ---- MONGO ----
 client = AsyncIOMotorClient(MONGO_URI)
 db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
-# ---- MODELOS ----
-MODEL_EMBED = "groq/compound-mini"  # modelo válido para embeddings
-MODEL_LLM = "groq/compound-mini"        # modelo para chat/LLM
+# Modelos
+MODEL_LLM = "groq/compound-mini"  # para chat
+MODEL_EMBED = "embed-multilingual-v2.0"  # Cohere embeddings
 
-EMBED_DIM = 384  # dimensões do embedding do modelo groq/embedding-3-small
-
-# -------- FUNÇÃO 1: gerar embedding --------
+# -------- FUNÇÃO 1: gerar embedding (Cohere) --------
 async def get_embedding(text: str):
-    if not groq_client:
-        logging.warning("Groq client não disponível, retornando embedding vazio")
-        return np.zeros(EMBED_DIM)
-
     try:
-        response = groq_client.embeddings.create(
-            model=MODEL_EMBED,
-            input=text
-        )
-        return np.array(response.data[0].embedding)
+        response = co.embed(texts=[text], model=MODEL_EMBED)
+        return np.array(response.embeddings[0])
     except Exception as e:
         logging.error(f"Erro ao gerar embedding: {e}")
-        return np.zeros(EMBED_DIM)
+        return np.zeros(1024)  # fallback
 
 # -------- FUNÇÃO 2: buscar top-k documentos similares --------
 async def search_similar_docs(query_embedding, k=3):
@@ -59,10 +47,6 @@ async def search_similar_docs(query_embedding, k=3):
     try:
         async for doc in collection_embeddings.find():
             doc_emb = np.array(doc["embedding"])
-            if doc_emb.shape != query_embedding.shape:
-                logging.warning(f"Dimensão incompatível: {doc_emb.shape} != {query_embedding.shape}")
-                continue
-
             similarity = np.dot(query_embedding, doc_emb) / (
                 np.linalg.norm(query_embedding) * np.linalg.norm(doc_emb) + 1e-10
             )
@@ -76,7 +60,7 @@ async def search_similar_docs(query_embedding, k=3):
         logging.error(f"Erro ao buscar documentos similares: {e}")
         return "Não foi possível buscar contexto relevante."
 
-# -------- FUNÇÃO 3: gerar resposta com RAG --------
+# -------- FUNÇÃO 3: gerar resposta com RAG (Groq chat) --------
 async def rag_answer(query: str):
     query_emb = await get_embedding(query)
     context = await search_similar_docs(query_emb)
@@ -94,11 +78,11 @@ Responda de forma clara e objetiva.
 """
     logging.info(f"Prompt para LLM:\n{prompt}")
 
-    if not groq_client:
-        logging.warning("Groq client não disponível, retornando fallback")
-        return "Desculpe, não consigo gerar resposta no momento."
-
     try:
+        from groq import Groq
+        import httpx
+        groq_client = Groq(api_key=GROQ_API_KEY, http_client=httpx.Client())
+
         response = groq_client.chat.completions.create(
             model=MODEL_LLM,
             messages=[
@@ -108,7 +92,6 @@ Responda de forma clara e objetiva.
             max_tokens=300
         )
 
-        # Corrige acesso à resposta
         message_obj = response.choices[0].message
         if hasattr(message_obj, "content"):
             return message_obj.content
