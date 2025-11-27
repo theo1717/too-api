@@ -31,15 +31,17 @@ client = AsyncIOMotorClient(MONGO_URI)
 db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
-# Modelos válidos para sua conta
-MODEL_EMBED = "groq/compound-mini"  # para embeddings
-MODEL_LLM = "groq/compound-mini"    # para chat
+# ---- MODELOS ----
+MODEL_EMBED = "groq/embedding-3-small"  # modelo válido para embeddings
+MODEL_LLM = "groq/compound-mini"        # modelo para chat/LLM
+
+EMBED_DIM = 384  # dimensões do embedding do modelo groq/embedding-3-small
 
 # -------- FUNÇÃO 1: gerar embedding --------
 async def get_embedding(text: str):
     if not groq_client:
         logging.warning("Groq client não disponível, retornando embedding vazio")
-        return np.zeros(1024)
+        return np.zeros(EMBED_DIM)
 
     try:
         response = groq_client.embeddings.create(
@@ -49,7 +51,7 @@ async def get_embedding(text: str):
         return np.array(response.data[0].embedding)
     except Exception as e:
         logging.error(f"Erro ao gerar embedding: {e}")
-        return np.zeros(1024)
+        return np.zeros(EMBED_DIM)
 
 # -------- FUNÇÃO 2: buscar top-k documentos similares --------
 async def search_similar_docs(query_embedding, k=3):
@@ -57,8 +59,13 @@ async def search_similar_docs(query_embedding, k=3):
     try:
         async for doc in collection_embeddings.find():
             doc_emb = np.array(doc["embedding"])
-            q_emb = np.array(query_embedding)
-            similarity = np.dot(q_emb, doc_emb) / (np.linalg.norm(q_emb) * np.linalg.norm(doc_emb) + 1e-10)
+            if doc_emb.shape != query_embedding.shape:
+                logging.warning(f"Dimensão incompatível: {doc_emb.shape} != {query_embedding.shape}")
+                continue
+
+            similarity = np.dot(query_embedding, doc_emb) / (
+                np.linalg.norm(query_embedding) * np.linalg.norm(doc_emb) + 1e-10
+            )
             results.append((similarity, doc["text"]))
 
         results.sort(key=lambda x: x[0], reverse=True)
@@ -101,7 +108,7 @@ Responda de forma clara e objetiva.
             max_tokens=300
         )
 
-        # ✅ Corrige acesso à resposta
+        # Corrige acesso à resposta
         message_obj = response.choices[0].message
         if hasattr(message_obj, "content"):
             return message_obj.content
