@@ -32,7 +32,7 @@ db_embeddings = client.file_data
 collection_embeddings = db_embeddings.get_collection("embeddings")
 
 # ---- MODELOS ----
-MODEL_EMBED = "groq/embedding-3-small"  # modelo válido para embeddings
+MODEL_EMBED = "groq/compound-mini"  # modelo válido para embeddings
 MODEL_LLM = "groq/compound-mini"        # modelo para chat/LLM
 
 EMBED_DIM = 384  # dimensões do embedding do modelo groq/embedding-3-small
