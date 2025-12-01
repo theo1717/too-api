@@ -110,3 +110,7 @@ Responda de forma direta, profissional e concisa, sem incluir informações irre
     except Exception as e:
         logging.error(f"Erro ao gerar resposta Groq: {e}")
         return "Desculpe, não consegui gerar uma resposta no momento."
+
+# Alias para o controller usar
+async def run_rag(query: str, chat_id: str = None, user_email: str = None):
+    return await rag_answer(query, chat_id, user_email)

@@ -1,201 +1,24 @@
-# main.py
-import os
-import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, Path
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
-from motor.motor_asyncio import AsyncIOMotorClient
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
-from jose import jwt, JWTError
-from passlib.context import CryptContext
-from fastapi.security import OAuth2PasswordBearer
 
-# --- RAG Import ---
-from rag import rag_answer  # usa embeddings do Mongo + Groq Chat
+from routes.auth_routes import router as auth_routes
+from routes.chat_routes import router as chat_routes
+from routes.usuarios_routes import router as usuarios_routes
 
-load_dotenv()
+app = FastAPI(title="Too AI API")
 
-app = FastAPI()
-
-# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- MONGO ---
-MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise Exception("Erro: MONGO_URI não encontrada.")
+app.include_router(auth_routes, prefix="/auth")
+app.include_router(chat_routes, prefix="/chat")
+app.include_router(usuarios_routes, prefix="/usuarios")
 
-client = AsyncIOMotorClient(MONGO_URI)
-db_users = client.users
-collection_users = db_users.get_collection("too_users")
-db_chats = client.chats
-collection_history = db_chats.get_collection("history")
-
-# --- SEGURANÇA ---
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = os.getenv("SECRET_KEY", "CHAVE_MUITO_SECRETA")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-oauth2 = OAuth2PasswordBearer(tokenUrl="/login")
-
-# --- MODELS ---
-class UserRegister(BaseModel):
-    email: EmailStr
-    password: str
-
-class UserUpdate(BaseModel):
-    email: EmailStr | None = None
-    password: str | None = None
-
-class LoginRequest(BaseModel):
-    username: EmailStr
-    password: str
-
-class ChatRequest(BaseModel):
-    chat_id: str | None = None
-    message: str
-
-# --- FUNÇÕES AUXILIARES ---
-def hash_password(password):
-    return pwd_context.hash(password[:72])
-
-def verify_password(password, hashed):
-    return pwd_context.verify(password[:72], hashed)
-
-def create_token(data: dict):
-    data = data.copy()
-    data["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
-
-async def get_user_from_token(token: str = Depends(oauth2)):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("sub")
-        if not email:
-            raise HTTPException(status_code=401, detail="Token inválido")
-        user = await collection_users.find_one({"email": email})
-        if not user:
-            raise HTTPException(status_code=401, detail="Usuário não encontrado")
-        return user
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-# --- ROTAS ---
 @app.get("/")
-async def root():
-    return {"mensagem": "API funcionando!"}
-
-@app.post("/register")
-async def register_user(user: UserRegister):
-    existing = await collection_users.find_one({"email": user.email})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email já registrado")
-    hashed = hash_password(user.password)
-    new_user = {"email": user.email, "password": hashed}
-    result = await collection_users.insert_one(new_user)
-    return {"mensagem": "Usuário registrado", "user_id": str(result.inserted_id)}
-
-@app.post("/login")
-async def login(data: LoginRequest):
-    user = await collection_users.find_one({"email": data.username})
-    if not user or not verify_password(data.password, user["password"]):
-        raise HTTPException(status_code=400, detail="Email ou senha incorretos.")
-    token = create_token({"sub": user["email"]})
-    return {"access_token": token, "token_type": "bearer"}
-
-@app.post("/chat")
-async def chat(req: ChatRequest, current_user=Depends(get_user_from_token)):
-    chat_id = req.chat_id or str(datetime.utcnow().timestamp())
-
-    # --- Salva a mensagem do usuário ---
-    user_msg = {
-        "chat_id": chat_id,
-        "user_email": current_user["email"],
-        "sender": "user",
-        "text": req.message,
-        "timestamp": datetime.utcnow()
-    }
-    await collection_history.insert_one(user_msg)
-
-    # --- Conta mensagens anteriores ---
-    previous_msgs_count = await collection_history.count_documents({
-        "chat_id": chat_id,
-        "user_email": current_user["email"]
-    })
-
-    # --- Gera resposta com RAG (Mongo embeddings + Groq Chat) ---
-    answer_text = await rag_answer(
-        query=req.message,
-        chat_id=chat_id,
-        user_email=current_user["email"] if previous_msgs_count == 1 else None
-    )
-
-    # --- Salva resposta do bot ---
-    bot_msg = {
-        "chat_id": chat_id,
-        "user_email": current_user["email"],
-        "sender": "bot",
-        "text": answer_text,
-        "timestamp": datetime.utcnow()
-    }
-    await collection_history.insert_one(bot_msg)
-
-    return {"answer": answer_text, "chat_id": chat_id}
-
-@app.get("/chat-history")
-async def chat_list(current_user=Depends(get_user_from_token)):
-    pipeline = [
-        {"$match": {"user_email": current_user["email"]}},
-        {"$sort": {"timestamp": 1}},
-        {"$group": {"_id": "$chat_id", "first_message": {"$first": "$text"}, "date": {"$first": "$timestamp"}}},
-        {"$sort": {"date": -1}}
-    ]
-    cursor = collection_history.aggregate(pipeline)
-    chats = []
-    async for chat in cursor:
-        chats.append({
-            "id": chat["_id"],
-            "title": chat["first_message"][:40] + "...",
-            "date": chat["date"].strftime("%Y-%m-%d"),
-        })
-    return {"chats": chats}
-
-@app.post("/new-chat")
-async def new_chat(current_user=Depends(get_user_from_token)):
-    new_id = str(datetime.utcnow().timestamp())
-    await collection_history.insert_one({
-        "chat_id": new_id,
-        "user_email": current_user["email"],
-        "sender": "system",
-        "text": "Chat criado",
-        "timestamp": datetime.utcnow()
-    })
-    return {"chat_id": new_id}
-
-@app.get("/chat-history/{chat_id}")
-async def get_chat_messages(chat_id: str, current_user=Depends(get_user_from_token)):
-    cursor = collection_history.find(
-        {"chat_id": chat_id, "user_email": current_user["email"]},
-        sort=[("timestamp", 1)]
-    )
-    msgs = []
-    async for m in cursor:
-        msgs.append({"sender": m.get("sender"), "text": m.get("text"), "timestamp": m.get("timestamp")})
-    return {"chat_id": chat_id, "messages": msgs}
-
-@app.delete("/delete-chat/{chat_id}")
-async def delete_chat(chat_id: str = Path(...), current_user=Depends(get_user_from_token)):
-    result = await collection_history.delete_many({"chat_id": chat_id, "user_email": current_user["email"]})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Chat não encontrado")
-    return {"mensagem": f"Chat {chat_id} deletado com sucesso."}
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
+def root():
+    return {"status": "API rodando com RAG Cohere + Groq"}
